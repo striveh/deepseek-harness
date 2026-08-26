@@ -13,6 +13,7 @@
  * @module @deepseek-ai/dsh-mcp-client
  */
 
+import { randomUUID } from 'node:crypto'
 import type { Context } from '@deepseek-ai/cordis'
 import z from '@deepseek-ai/schemastery'
 import { MAX_TIMER_DELAY_MS } from '@deepseek-ai/dsh-timeout'
@@ -42,7 +43,66 @@ const SERVER_NAME_PATTERN = /^[A-Za-z0-9_-]{1,32}$/
  * namespace is a configuration error surfaced at plugin load, never silent
  * shadowing.
  */
-const activeServerNames = new WeakMap<Context, Set<string>>()
+const activeServerNames = new WeakMap<Context, Map<string, string>>()
+
+/** Opaque live reservation for one app-root MCP server namespace. */
+export interface McpServerNameReservation {
+  /** Unforgeable handoff token accepted only while this reservation remains active in its app root. */
+  readonly token: string
+  /** Release the reservation; repeated calls are harmless. */
+  release(): void
+}
+
+interface McpServerNameReservationState {
+  readonly serverName: string
+  readonly token: string
+  readonly names: Map<string, string>
+  active: boolean
+}
+
+/**
+ * Atomically reserve one server namespace in the app root before a durable owner commits activation.
+ * @param ctx - any Context in the target app root.
+ * @param serverName - validated MCP server name.
+ * @returns an opaque idempotently releasable reservation.
+ */
+export function reserveMcpServerName(ctx: Context, serverName: string): McpServerNameReservation {
+  if (!SERVER_NAME_PATTERN.test(serverName)) {
+    throw new TypeError(`mcp-client: serverName ${JSON.stringify(serverName)} must match ${String(SERVER_NAME_PATTERN)}`)
+  }
+  let names = activeServerNames.get(ctx.root)
+  if (names === undefined) {
+    names = new Map()
+    activeServerNames.set(ctx.root, names)
+  }
+  if (names.has(serverName)) {
+    throw new Error(
+      `mcp-client: serverName "${serverName}" is already in use by another mcp-client instance — pick a unique serverName in cordis.yml`,
+    )
+  }
+  const token = randomUUID()
+  names.set(serverName, token)
+  const state: McpServerNameReservationState = { serverName, token, names, active: true }
+  const reservation: McpServerNameReservation = Object.freeze({
+    token,
+    release() {
+      if (!state.active) return
+      state.active = false
+      state.names.delete(state.serverName)
+    },
+  })
+  return reservation
+}
+
+function assertMcpServerNameReservation(
+  ctx: Context,
+  serverName: string,
+  token: string,
+): void {
+  if (activeServerNames.get(ctx.root)?.get(serverName) !== token) {
+    throw new Error(`mcp-client: supplied serverName reservation for "${serverName}" is absent, released, or belongs to another app root`)
+  }
+}
 
 // ---- Config ----
 
@@ -86,6 +146,8 @@ export interface StreamableHttpConfig {
   url: string
   /** Additional headers attached to MCP requests. */
   headers: Record<string, string>
+  /** Explicit Fetch redirect policy for every MCP HTTP request. */
+  redirect: 'error' | 'follow' | 'manual'
   /** Per-tool-call timeout in milliseconds. */
   toolCallTimeoutMs: number
   /** Fail plugin activation when the initial connection or tool synchronization fails. */
@@ -121,6 +183,7 @@ export const Config = z.union([
     serverName: z.string().required().pattern(SERVER_NAME_PATTERN),
     url: z.string().required(),
     headers: z.dict(String).default({}),
+    redirect: z.union([z.const('error'), z.const('follow'), z.const('manual')]).required(),
     toolCallTimeoutMs: z.number().default(DEFAULT_TOOL_CALL_TIMEOUT_MS),
     failOnStartupError: z.boolean().default(false),
     reconnect: Reconnect,
@@ -135,9 +198,14 @@ export const Config = z.union([
  * ordinary function as a constructor, whose returned Promise is not startup work.
  * @param ctx - plugin context carrying the tool registry.
  * @param config - resolved transport and server namespace configuration.
+ * @param lentReservation - optional exact reservation retained by a dynamic parent lifecycle.
  * @returns startup readiness after connection and initial tool discovery settle.
  */
-export async function apply(ctx: Context, config: Config): Promise<void> {
+export async function apply(
+  ctx: Context,
+  config: Config,
+  lentReservation?: McpServerNameReservation,
+): Promise<void> {
   // Fail loud at load: reconnect misconfiguration (including programmatic
   // construction that bypassed Schemastery) rejects THIS instance before any
   // effect registers.
@@ -146,18 +214,12 @@ export async function apply(ctx: Context, config: Config): Promise<void> {
   // Reserve the namespace next: a duplicate `serverName` fails THIS instance
   // at load with an actionable error and leaves the earlier instance intact.
   ctx.effect(() => {
-    let names = activeServerNames.get(ctx.root)
-    if (!names) {
-      names = new Set()
-      activeServerNames.set(ctx.root, names)
+    if (lentReservation !== undefined) {
+      assertMcpServerNameReservation(ctx, config.serverName, lentReservation.token)
+      return () => {}
     }
-    if (names.has(config.serverName)) {
-      throw new Error(
-        `mcp-client: serverName "${config.serverName}" is already in use by another mcp-client instance — pick a unique serverName in cordis.yml`,
-      )
-    }
-    names.add(config.serverName)
-    return () => void names.delete(config.serverName)
+    const reservation = reserveMcpServerName(ctx, config.serverName)
+    return () => { reservation.release() }
   }, 'mcp-client.serverName')
 
   // The supervisor owns the client/transport generations, the reconnect

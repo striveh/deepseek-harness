@@ -11,10 +11,11 @@ import { join, resolve } from 'node:path'
 import {
   loadOptionalPatches,
   loadOverlayPatches,
+  PROFILE_PATCH_FILENAME,
   renderConfigDump,
   type ConfigDumpLayer,
 } from '@deepseek-ai/dsh-app-boot'
-import { homePatchPath, prepareProfile, PROFILE_ROOT_FILENAME } from './profile-boot.ts'
+import { homePatchPath, prepareTransactionalProfile } from './profile-boot.ts'
 
 const NAME = 'dsh'
 
@@ -27,27 +28,61 @@ const NAME = 'dsh'
  * never parsed).
  * @param patches - `--patch` overlay paths, in argv order.
  */
-export function runDumpConfig(profile: string, defaultOnly: boolean, patches: readonly string[]): void {
-  const loaded = prepareProfile(profile, !defaultOnly)
-  const layers: ConfigDumpLayer[] = loaded.layers.map(layer => ({
-    label: layer.packageName,
-    patches: layer.patches,
-  }))
-  if (!defaultOnly) {
-    if (existsSync(loaded.patchPath)) {
-      layers.push({ label: loaded.patchPath, patches: loaded.patches })
+export async function runDumpConfig(profile: string, defaultOnly: boolean, patches: readonly string[]): Promise<void> {
+  const prepared = await prepareTransactionalProfile(profile, !defaultOnly)
+  const loaded = prepared.profile
+  let primaryFailure: { readonly error: unknown } | undefined
+  try {
+    const layers: ConfigDumpLayer[] = loaded.layers.map(layer => ({
+      label: layer.packageName,
+      patches: layer.patches,
+    }))
+    if (!defaultOnly) {
+      if (existsSync(loaded.patchPath)) {
+        layers.push({
+          label: join(prepared.snapshot.effectivePath, PROFILE_PATCH_FILENAME),
+          patches: loaded.patches,
+        })
+      }
+      const homePatchFile = homePatchPath()
+      const homePatches = loadOptionalPatches(NAME, homePatchFile)
+      if (homePatches !== undefined) {
+        layers.push({ label: homePatchFile, patches: homePatches })
+      }
+      for (const file of patches) {
+        const absolute = resolve(file)
+        layers.push({ label: absolute, patches: loadOverlayPatches(NAME, absolute) })
+      }
     }
-    const homePatchFile = homePatchPath()
-    const homePatches = loadOptionalPatches(NAME, homePatchFile)
-    if (homePatches !== undefined) {
-      layers.push({ label: homePatchFile, patches: homePatches })
+    process.stdout.write(renderConfigDump(NAME, prepared.rootConfig, layers))
+  } catch (error) {
+    primaryFailure = { error }
+  } finally {
+    const cleanupFailures: unknown[] = []
+    try {
+      await prepared.transactionConsumer.close()
+    } catch (error) {
+      cleanupFailures.push(error)
     }
-    for (const file of patches) {
-      const absolute = resolve(file)
-      layers.push({ label: absolute, patches: loadOverlayPatches(NAME, absolute) })
+    try {
+      prepared.releaseRootConfig()
+    } catch (error) {
+      cleanupFailures.push(error)
+    }
+    if (primaryFailure !== undefined) {
+      if (cleanupFailures.length > 0) {
+        throw new AggregateError(
+          [primaryFailure.error, ...cleanupFailures],
+          'dsh: config dump failed and runtime cleanup also failed',
+          { cause: primaryFailure.error },
+        )
+      }
+      throw primaryFailure.error
+    }
+    if (cleanupFailures.length === 1) throw cleanupFailures[0]
+    if (cleanupFailures.length > 1) {
+      throw new AggregateError(cleanupFailures, 'dsh: multiple config dump cleanup operations failed')
     }
   }
-  // The dump anchors on the same empty root file the boot includes.
-  process.stdout.write(renderConfigDump(NAME, join(loaded.dir, PROFILE_ROOT_FILENAME), layers))
 }
 /* v8 ignore stop */

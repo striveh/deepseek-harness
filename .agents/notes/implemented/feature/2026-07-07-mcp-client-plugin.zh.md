@@ -48,13 +48,14 @@ interface StreamableHttpConfig {
   serverName: string          // required namespace, ^[A-Za-z0-9_-]{1,32}$
   url: string
   headers?: Record<string, string>
+  redirect: 'error' | 'follow' | 'manual'
   toolCallTimeoutMs?: number  // default 60_000
 }
 
 type Config = StdioConfig | StreamableHttpConfig
 ```
 
-`serverName` 是稳定的本地标识，用于在模型可见名称（见下文）中为该服务器的工具提供命名空间。它有意设计为用户配置，而非远端的 `serverInfo.name`：远端名称是不可信输入、跨部署不唯一（同一服务器的生产和预发布实例报告相同名称）、且可能在服务器升级时变化——这些都不得静默重命名模型可见工具。多个活跃实例使用重复的 `serverName` 属于配置错误：后加载的实例在启动时以可操作的错误消息失败，绝不静默覆盖或跳过。短 `serverName`（如 `gh`）也是缩短公开名称的配置手段。
+`serverName` 是稳定的本地标识，用于在模型可见名称（见下文）中为该服务器的工具提供命名空间。它有意设计为用户配置，而非远端的 `serverInfo.name`：远端名称是不可信输入、跨部署不唯一（同一服务器的生产和预发布实例报告相同名称）、且可能在服务器升级时变化——这些都不得静默重命名模型可见工具。即使任一服务器还未发布工具，多个活跃实例使用重复的 `serverName` 仍属于配置错误：后加载的实例在启动时以可操作的错误消息失败，绝不静默覆盖或跳过。动态 lifecycle owner 可以在持久提交前取得同一 app-root reservation，并把其 opaque token 借给 child plugin；owner 只会在 child teardown 完全停稳后释放它。短 `serverName`（如 `gh`）也是缩短公开名称的配置手段。
 
 `cordis.yml` 用法示例：
 
@@ -75,6 +76,7 @@ type Config = StdioConfig | StreamableHttpConfig
     serverName: web
     transport: streamable-http
     url: http://localhost:3000/mcp
+    redirect: error
     headers:
       Authorization: !!js `Bearer ${process.env.MCP_TOKEN}`
 ```

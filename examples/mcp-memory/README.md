@@ -98,4 +98,4 @@ Copy the same entry fields and use a unique `id` and `serverName`:
         cwd: !!js process.cwd()
 ```
 
-For a remote server, use `transport: streamable-http`, `url`, and `headers` instead. Provider-specific installation, identity, authentication, models, embeddings, persistence, and licensing remain the provider's responsibility.
+For a remote server, use `transport: streamable-http`, `url`, `redirect`, and `headers` instead. Set `redirect: error` unless the operator has explicitly reviewed a different Fetch redirect policy. Provider-specific installation, identity, authentication, models, embeddings, persistence, and licensing remain the provider's responsibility.

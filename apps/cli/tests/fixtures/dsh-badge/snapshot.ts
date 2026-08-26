@@ -11,10 +11,11 @@ const overlayPath = process.argv[2]
 if (overlayPath === undefined) throw new Error('dsh-badge snapshot requires an overlay path')
 const rootConfigPath = fileURLToPath(new URL('../../../../../packages/bundle/base/tests/fixtures/root.cordis.yml', import.meta.url))
 const basePatchPath = fileURLToPath(new URL('../../../../../packages/bundle/base/cordis.patch.yml', import.meta.url))
+const installAnchor = fileURLToPath(new URL('../../../package.json', import.meta.url))
 const ctx = await boot('dsh-badge-snapshot', rootConfigPath, [
   ...loadOverlayPatches('dsh-badge-snapshot', basePatchPath),
   ...loadOverlayPatches('dsh-badge-snapshot', overlayPath),
-])
+], (hostCtx) => { hostCtx.provide('dshInstallAnchor', installAnchor) })
 
 try {
   const agentId = SessionId('dsh-badge-snapshot')

@@ -12,6 +12,11 @@ import {
   writeClientBuildRecord,
 } from './client-build-environment.ts'
 import { pnpmInvocation } from './pnpm-invocation.ts'
+import {
+  REPOSITORY_BUILD_RECORD_PATH,
+  repositorySourceDigest,
+  writeRepositoryBuildRecord,
+} from './repository-build-record.ts'
 
 /** Run one package script through the package manager that invoked this build. */
 function runScript(script: string, environment: NodeJS.ProcessEnv): void {
@@ -40,11 +45,18 @@ function main(): void {
   }
   const clientEnvironment = resolveClientBuildEnvironment(parentEnvironment, values.profile)
   const buildEnvironment = clientBuildProcessEnvironment(parentEnvironment, clientEnvironment)
+  const sourceAtStart = repositorySourceDigest(root)
 
   rmSync(resolve(root, CLIENT_BUILD_RECORD_PATH), { force: true })
+  rmSync(resolve(root, REPOSITORY_BUILD_RECORD_PATH), { force: true })
   runScript('build:lib', buildEnvironment)
   runScript('build:web', buildEnvironment)
+  const repositoryRecord = writeRepositoryBuildRecord(root, sourceAtStart)
   const record = writeClientBuildRecord(root, clientEnvironment)
+  console.log(
+    `build: recorded ${String(repositoryRecord.source.fileCount)} source file(s) and `
+      + `${String(repositoryRecord.runtimeArtifacts.fileCount)} runtime artifact(s)`,
+  )
   console.log(
     `build: recorded ${String(record.artifacts.fileCount)} client artifact(s) with ${String(Object.keys(record.environment).length)} public value(s)`,
   )

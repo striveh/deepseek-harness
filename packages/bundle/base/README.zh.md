@@ -8,6 +8,8 @@ patch 在自身上按平台门控两个 shell 栈：`bash-sandbox`/`tool-bash` �
 
 行集合及其设计依据以行内注释写在 patch 文件里；[生成的组合图](../../../apps/cli/composition.md)负责渲染它。
 
+直接挂载该组合包的嵌入宿主必须在 Loader 条目激活前提供 `ctx.dshInstallAnchor`。该值是一个绝对路径、指向持有 Profile bundle 解析依赖面的普通 package 文件；产品 CLI 使用自身的 `package.json`。`dsh-app-boot` 不会推断这项由宿主持有的 authority。
+
 ## 模型体验
 
 通过插入的行间接产生影响：该组合包选定了随发行版交付的无 persona 提示词基座、工具集合与 DeepSeek 适配器，供各模式组合包进一步特化；它自身不贡献任何模型可见文本。

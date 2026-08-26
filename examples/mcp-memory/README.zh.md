@@ -98,4 +98,4 @@ Engram 负责存储和项目选择：它默认使用 `~/.engram`，从 DSH 工�
         cwd: !!js process.cwd()
 ```
 
-对于远程服务器，请改用 `transport: streamable-http`、`url` 和 `headers`。提供方专属的安装、身份、认证、模型、embedding、持久化和许可仍由提供方负责。
+对于远程服务器，请改用 `transport: streamable-http`、`url`、`redirect` 和 `headers`；除非运维人员已明确审查其他 Fetch 重定向策略，否则设置 `redirect: error`。提供方专属的安装、身份、认证、模型、embedding、持久化和许可仍由提供方负责。

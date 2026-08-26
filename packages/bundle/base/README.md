@@ -8,6 +8,8 @@ The patch gates both shell stacks by platform on its own rows: `bash-sandbox`/`t
 
 The row set and its rationale are documented inline in the patch file; the [generated composition graph](../../../apps/cli/composition.md) renders it.
 
+An embedding host that mounts this bundle directly must provide `ctx.dshInstallAnchor` before Loader entries activate. Its value is the absolute regular package file whose dependency surface owns Profile bundle resolution; the product CLI uses its own `package.json`. `dsh-app-boot` does not infer this host-owned authority.
+
 ## Model Experience
 
 Indirectly, through the inserted rows: this bundle selects the shipped persona-less prompt base, tool set, and DeepSeek adapter that mode bundles specialize, and contributes no model-visible text of its own.

@@ -2,20 +2,11 @@
 
 English | [中文](publish.zh.md)
 
-The previous tutorials loaded a local plugin through a `--patch` overlay. This tutorial packages it as an installable **bundle**, installs it into a **profile** with `dsh plugin add`, and explains the layer order that determines the composed configuration. It assumes the `dsh` CLI is installed. Complete [plugin configuration](./config.md) first.
+This tutorial packages the local plugin as a complete `.tgz` bundle and manages it through the exact P0 Profile transactions. P0 accepts local artifacts only: registry discovery, download, trust, and approval happen before the `dsh plugin` command. It assumes the `dsh` CLI is installed. Complete [plugin configuration](./config.md) first.
 
-To use a fresh source checkout instead, complete the [run-from-source section](../../../../README.md#run-from-source), keep this tutorial's `hello-plugin` directory at the repository root, and run the remaining `dsh ...` commands from there as `pnpm dsh ...`. See [source execution](../../../../apps/cli/reference/README.md#source-execution) for build and launcher behavior.
+To use a fresh source checkout, complete [run from source](../../../../README.md#run-from-source), keep this tutorial's `hello-plugin` directory at the repository root, and replace each `dsh ...` invocation below with `pnpm dsh ...`. See [source execution](../../../../apps/cli/reference/README.md#source-execution) for launcher behavior.
 
-## Two concepts, two manifests
-
-Installation is built on two concepts. Both are described by a `package.json`, but they carry different kinds of manifest under the `dsh` key, and they answer different questions:
-
-- A **bundle** is an npm package that ships a configuration layer. Its manifest declares `dsh.bundle`, answering "what does this package contribute?": a patch file that inserts or overrides plugin rows.
-- A **profile** is a directory under `$DSH_HOME/profiles/<name>` describing one runnable composition. Its manifest declares `dsh.profile`, answering "which bundles compose this setup, in what order?".
-
-A bundle is what you author and distribute; a profile is what a user boots with `dsh --profile <name>`. Nothing is both.
-
-### The bundle manifest
+## Build a P0 bundle
 
 Create the package directory:
 
@@ -23,11 +14,13 @@ Create the package directory:
 mkdir -p hello-plugin
 ```
 
+The package contains the npm manifest, one bundle patch, and the plugin module referenced by that patch:
+
 ```
 hello-plugin/
 ├── package.json       # declares dsh.bundle
-├── cordis.patch.yml   # the layer applied when a profile lists this bundle
-└── index.js           # plugin modules the patch rows reference
+├── cordis.patch.yml   # bundle layer
+└── index.js           # plugin module
 ```
 
 Create `hello-plugin/package.json`:
@@ -43,7 +36,9 @@ Create `hello-plugin/package.json`:
 }
 ```
 
-Create `hello-plugin/index.js` with the plugin entry point:
+The version must be one exact SemVer such as `0.1.0`, not a range or tag. A P0 artifact cannot declare non-empty `dependencies`, `optionalDependencies`, `bundledDependencies`, or `bundleDependencies`; it also cannot declare `preinstall`, `install`, `postinstall`, or `prepare` scripts, or any `bin` entry. Ship every runtime file in the archive itself.
+
+Create `hello-plugin/index.js`:
 
 ```js
 export const name = 'hello-plugin'
@@ -53,7 +48,7 @@ export function apply() {
 }
 ```
 
-Create `hello-plugin/cordis.patch.yml`. The patch is a YAML array like the `--patch` overlays you have been writing, except plugin rows reference the package by name instead of a relative source path so Node resolution finds the installed code:
+Create `hello-plugin/cordis.patch.yml`. A bundle patch refers to installed code by package name:
 
 ```yaml
 - insert:
@@ -61,123 +56,107 @@ Create `hello-plugin/cordis.patch.yml`. The patch is a YAML array like the `--pa
       name: dsh-hello-plugin
 ```
 
-A package without the `dsh.bundle` declaration still installs, but only as a plain dependency: `dsh plugin` prints a warning and activates no layer. Use that package format for a library that plugin packages import rather than a plugin users enable.
+The requested `--kind bundle` requires `dsh.bundle.patch` to name a regular file inside the archive. Use `--kind package` only for an artifact with no bundle declaration; such a package is installed but contributes no patch layer.
 
-### The profile manifest
+## Pack and hash the exact artifact
 
-A profile directory holds two files:
-
-- `package.json` — the profile's out-of-tree plugin dependencies (managed by pnpm) plus the `dsh.profile` manifest with its ordered `bundles` list.
-- `cordis.patch.yml` — the user's own patch layer, applied after every bundle layer.
-
-You never write a profile manifest by hand: `dsh plugin` creates and maintains it. The next section shows the result.
-
-## Install into a profile
-
-`dsh plugin --profile <name> <args...>` forwards to pnpm in the profile directory, so every pnpm verb works. From the directory that contains `hello-plugin`, install the package checkout:
+Pack the complete artifact, then calculate the SHA-256 of those exact `.tgz` bytes:
 
 ```sh
-dsh plugin --profile demo add ./hello-plugin
+cd hello-plugin
+pnpm pack
+cd ..
+ARTIFACT_SHA256="$(shasum -a 256 ./hello-plugin/dsh-hello-plugin-0.1.0.tgz | awk '{print $1}')"
 ```
 
-The first use initializes the profile (with `@deepseek-ai/dsh-base` as its first bundle), pnpm links the checkout, and `dsh` appends the bundle to `dsh.profile.bundles` because the package declares `dsh.bundle`:
+The CLI requires the canonical digest form `sha256:<64-lowercase-hex>`. Repacking changes the bytes, so calculate the digest again after every pack.
 
-```json
-{
-  "name": "dsh-profile-demo",
-  "private": true,
-  "dependencies": {
-    "dsh-hello-plugin": "link:/path/to/hello-plugin"
-  },
-  "dsh": {
-    "profile": {
-      "bundles": [
-        "@deepseek-ai/dsh-base",
-        "dsh-hello-plugin"
-      ]
-    }
-  }
-}
-```
+## Install into the Web Profile
 
-Verify the layer without booting, then boot:
+Install the bundle with the exact name, version, digest, and kind declared by the archive:
 
 ```sh
-dsh --profile demo --dump-config   # shows a "# == dsh-hello-plugin" layer
-dsh --profile demo
+dsh plugin --profile web install \
+  ./hello-plugin/dsh-hello-plugin-0.1.0.tgz \
+  --package dsh-hello-plugin \
+  --version 0.1.0 \
+  --digest "sha256:${ARTIFACT_SHA256}" \
+  --kind bundle
 ```
 
-`dsh plugin --profile demo remove dsh-hello-plugin` removes both the dependency and the layer.
+`install` requires the package to be absent. On first use, it initializes the `web` Profile, preserves its in-box bundles, records the exact package and owner-maintained lock data, and appends a validated bundle to the ordered bundle list. A successful commit prints `restart required`; it does not modify a running Web process.
 
-## The loading order
-
-The effective configuration composes over an empty root by applying, in order:
-
-1. Each bundle patch named in the profile's `dsh.profile.bundles` list, in list order — `@deepseek-ai/dsh-base` first, then each installed bundle in the order it was added.
-2. The profile's own `cordis.patch.yml`.
-3. The home-level `$DSH_HOME/cordis.patch.yml` — machine-local preferences shared by every profile.
-4. Each `--patch <path>` overlay, in argv order.
-
-App arguments are not another patch layer. A surface bundle can resolve them through an ordinary app-owned service, described below.
-
-Later layers win per row, and a patch replaces a row's entire `config` value rather than deep-merging keys. Two consequences for bundle authors:
-
-- Your patch can override rows from earlier layers by `id` — the same way [the `dsh-web-app` bundle](../../../../packages/bundle/web-app/cordis.patch.yml) overrides `dsh-base` rows — but must restate every key the row needs, not just the changed one.
-- Users can override your rows in their profile's `cordis.patch.yml` without touching your package, so prefer configuration defaults users are likely to keep and let the schema carry the rest.
-
-In-box bundle names always resolve from the dsh installation itself; pnpm manages only out-of-tree packages, so your bundle can rely on `@deepseek-ai/dsh-base` being present and current.
-
-## Give a surface bundle its own command line
-
-A bundle that defines a runnable app mounts an ordinary provider plugin:
-
-```yaml
-- id: hello-startup
-  name: 'dsh-hello-plugin/startup'
-```
-
-The plugin exports `inject = ['cmdlineArgs']`, calls `parseCmdline` from [`@deepseek-ai/dsh-cmdline`](../../../../packages/boot/cmdline/README.md) with its own commander program, and provides its app-owned service from the program's action. The launcher hands every plugin the same immutable arguments after launcher flags, so app-specific flags need no launcher change and multiple plugins may parse the snapshot. The Loader row needs no launcher marker or special kind.
-
-Rows configured by those arguments inject the provider's service and read it from their own `!!js` options, with the deployment value beside it as the fallback:
-
-```yaml
-- id: my-app
-  name: '@example/my-app'
-  inject: [myAppStartup]
-  config:
-    port: !!js ctx.myAppStartup.port ?? 8080
-```
-
-On `--help`, the provider publishes no service, so those rows never activate. Loader mounts the composition once, waits for each row's ordinary injections, and only then evaluates that row's `!!js` config against its injected context.
-
-## Installing from GitHub: the build-script catch
-
-Publishing to a registry is not required — users can install straight from a git host:
+Inspect the pending generation, then start a new Web process. If Web is already running, stop it before the second command:
 
 ```sh
-dsh plugin --profile demo add github:you/hello-plugin
+dsh plugin --profile web list
+dsh web
 ```
 
-But a git install fetches **sources, not built artifacts**: nothing runs your `build` script, so a TypeScript package arrives without its `lib/` output and fails to load. Two things must happen, one on each side:
+The new process boots the active immutable generation and acknowledges it as last-good only after the real Loader activation succeeds. A failed boot leaves the previous last-good generation available for recovery.
 
-- **The author** ships a `prepare` script — pnpm runs it after a git install — that builds the published entry points from source, self-contained: it must not assume dev-only context such as a sibling monorepo checkout. [turtle-ui](https://github.com/deepseek-harness/turtle-ui) is a working example: its `prepare` runs a dedicated tsdown config that transpiles `src/` without project references or type checking.
-- **The user** allowlists the build. pnpm ≥10 refuses to run a git dependency's `prepare` script until it is explicitly allowed, so the first `add` fails; `dsh` points at the fix — copy the exact package key pnpm printed into the profile's `pnpm-workspace.yaml`:
+## Use the exact lifecycle operations
 
-  ```yaml
-  allowBuilds:
-    dsh-hello-plugin: true
-  ```
+`dsh plugin` accepts only `install`, `update`, `uninstall`, `configure`, `restore`, and `list`. It rejects `add`, `remove`, arbitrary pnpm verbs, and unsupported or duplicate flags.
 
-  and re-run the `add`.
+### Update
 
-Treat that allowance as what it is: **permission to execute the package's code on your machine at install time**, outside any sandbox the agent runs under. Only allow packages whose source you trust, and pin a commit (`github:you/hello-plugin#<sha>`) so a later push cannot silently change what runs.
+Change the package manifest to an exact next version, pack it again, and submit that artifact with `update`. The package must already be installed, and the command's name, version, digest, and kind must match the new archive exactly:
 
-If you would rather not ask users for the allowance, distribute built artifacts instead — neither form needs any build permission:
+```sh
+cd hello-plugin
+pnpm pack
+cd ..
+UPDATED_ARTIFACT_SHA256="$(shasum -a 256 ./hello-plugin/dsh-hello-plugin-0.2.0.tgz | awk '{print $1}')"
+dsh plugin --profile web update \
+  ./hello-plugin/dsh-hello-plugin-0.2.0.tgz \
+  --package dsh-hello-plugin \
+  --version 0.2.0 \
+  --digest "sha256:${UPDATED_ARTIFACT_SHA256}" \
+  --kind bundle
+```
 
-- **Publish to npm** with `lib/` built at `pnpm publish` time; `dsh plugin add your-package` then installs prebuilt code.
-- **Ship a tarball** from `pnpm pack`; users run `dsh plugin add ./hello-plugin-0.1.0.tgz`.
+The update becomes active only after restart.
+
+### Configure
+
+Configuration is an owner-mediated replacement of the Profile's complete `cordis.patch.yml`, not a fragment merge. The installed package's typed adapter must produce normalized UTF-8 text with LF line endings and a trailing newline. Read `snapshot.effectivePath` from `list`, hash the current bytes and the complete next file, then name the installed owner package:
+
+```sh
+dsh plugin --profile web list
+EFFECTIVE_PROFILE=/absolute/path/from-list
+EXPECTED_PATCH_SHA256="$(shasum -a 256 "${EFFECTIVE_PROFILE}/cordis.patch.yml" | awk '{print $1}')"
+NEXT_PATCH_SHA256="$(shasum -a 256 ./next.cordis.patch.yml | awk '{print $1}')"
+dsh plugin --profile web configure dsh-hello-plugin \
+  --patch-file ./next.cordis.patch.yml \
+  --expected-digest "sha256:${EXPECTED_PATCH_SHA256}" \
+  --next-digest "sha256:${NEXT_PATCH_SHA256}"
+```
+
+The transaction rejects an owner package that is not installed, stale current bytes, a mismatched next digest, or a next file that is not normalized. Configure also requires restart.
+
+### Uninstall, restore, and list
+
+Use these operations independently:
+
+- `dsh plugin --profile web uninstall dsh-hello-plugin` removes an installed package, its retained artifact, and its bundle-list entry in one validated generation.
+- `dsh plugin --profile web restore` publishes last-good when the active generation is unverified; otherwise it publishes the verified rollback generation. It fails when no recoverable generation exists.
+- `dsh plugin --profile web list` is read-only and reports the active, staged, and recoverable generations plus boot status and the effective Profile path.
+
+Uninstall and restore print `restart required`; list never changes Profile state.
+
+## Validation and restart behavior
+
+Every P0 mutation follows the same rules:
+
+- Only the `web` Profile accepts install, update, uninstall, configure, or restore mutations. `list` is read-only.
+- Install requires an absent exact package name; update, uninstall, and configure require that exact package to be installed.
+- The transaction owner copies the complete effective Profile, verifies artifact identity and digest, updates the package graph and lock records together, and runs Provider-owned real Web Loader activation against the unchanged candidate before commit.
+- Commit publishes an immutable generation and returns `restart required`; it never hot-swaps the running process. Managed Profile configuration crosses the same restart boundary.
+
+Validation minimizes inherited credentials and provider settings in the child process, but it is not a filesystem or network sandbox. An admitted plugin still executes with the host user's operating-system authority, so only package artifacts whose exact bytes were approved should reach this command.
 
 ## Next steps
 
-- [Plugins and lifecycle](../framework/index.md) — the full plugin lifecycle
-- [CLI behavior reference](../../../../apps/cli/reference/README.md) — exact layer precedence, flags, and profile mechanics
+- [Plugins and lifecycle](../framework/index.md) — the plugin programming model
+- [CLI behavior reference](../../../../apps/cli/reference/README.md) — exact transaction fields, recovery, validation, and restart behavior

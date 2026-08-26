@@ -22,18 +22,44 @@
  * @module @deepseek-ai/dsh-app-boot/profile
  */
 
+import { createHash, randomUUID } from 'node:crypto'
 import { createRequire } from 'node:module'
 import {
-  existsSync, lstatSync, mkdirSync, readFileSync, readlinkSync, symlinkSync, unlinkSync, writeFileSync,
+  closeSync,
+  constants,
+  existsSync,
+  fsyncSync,
+  linkSync,
+  lstatSync,
+  mkdirSync,
+  openSync,
+  readFileSync,
+  readdirSync,
+  readlinkSync,
+  statSync,
+  symlinkSync,
+  unlinkSync,
+  writeFileSync,
 } from 'node:fs'
-import { basename, dirname, join } from 'node:path'
+import { basename, dirname, join, resolve } from 'node:path'
 import type { EntryOptions } from '@deepseek-ai/cordis-plugin-loader'
 import { applyEntryPatches, type PatchOptions } from '@deepseek-ai/cordis-plugin-include'
 import { resolveDshHome } from '@deepseek-ai/dsh-home-paths'
+import {
+  currentProcessIncarnation,
+  readProcessIncarnation,
+  type ProcessIncarnation,
+} from '@deepseek-ai/dsh-native-command'
 import { loadOverlayPatches } from './index.ts'
 
 /** Directory under the Harness home holding every profile. */
 export const PROFILES_DIR = 'profiles'
+
+/** Reserved Profile sibling holding generation transactions and initialization coordination. */
+export const PROFILE_TRANSACTION_ROOT = '.dsh-profile-transactions'
+
+/** Basename of the launcher-owned empty Loader root, including private runtime roots. */
+export const PROFILE_ROOT_FILENAME = 'cordis.yml'
 
 /** The user patch layer inside a profile directory (hot-reloaded on long-lived surfaces). */
 export const PROFILE_PATCH_FILENAME = 'cordis.patch.yml'
@@ -95,6 +121,16 @@ export interface Profile {
   patches: PatchOptions[]
 }
 
+/** Alternate Profile location and mutation policy used by generation-aware consumers. */
+export interface LoadProfileOptions {
+  /** Skip reading the Profile patch layer for a bundles-only diagnostic. */
+  userLayer?: boolean
+  /** Read this complete Profile tree instead of the live named directory. */
+  profileDir?: string
+  /** Reject initialization and normalization writes to an immutable generation. */
+  readOnly?: boolean
+}
+
 /**
  * Resolve a profile's directory under the Harness home.
  * @param name - the profile name (`dsh --profile <name>`).
@@ -104,7 +140,7 @@ export interface Profile {
 export function resolveProfileDir(name: string, home: string = resolveDshHome()): string {
   if (name === '' || name.includes('/') || name.includes('\\') || name === '.' || name === '..'
     // The launcher-maintained flat module fallback lives at this sibling path.
-    || name === 'node_modules') {
+    || name === 'node_modules' || name === PROFILE_TRANSACTION_ROOT) {
     throw new Error(`dsh: invalid profile name ${JSON.stringify(name)}`)
   }
   return join(home, PROFILES_DIR, name)
@@ -142,29 +178,329 @@ nodeLinker: hoisted
 autoInstallPeers: false
 `
 
+const PROFILE_PNPM_LOCK = `lockfileVersion: '9.0'
+
+settings:
+  autoInstallPeers: false
+  excludeLinksFromLockfile: false
+
+importers:
+
+  .:
+    dependencies: {}
+
+packages: {}
+
+snapshots: {}
+`
+
+const PROFILE_INITIALIZATION_COORDINATOR = 'initialization.sqlite'
+
+interface ProfileAtomicTemporaryOwner {
+  readonly pid: number
+  readonly incarnationFingerprint: string
+}
+
+interface ProfileTemplateFile {
+  readonly name: string
+  readonly content: string
+}
+
+/** Policy supplied by one Profile owner when durably creating directory components. */
+export interface DurableProfileDirectoryOptions {
+  /** Permission bits for newly created components; omission preserves the platform default. */
+  readonly mode?: number
+  /** Build the owner-specific failure for an `EEXIST` component that is not a directory. */
+  readonly notDirectory: (directory: string) => Error
+}
+
+function isErrno(error: unknown, code: string): boolean {
+  return error instanceof Error && 'code' in error && error.code === code
+}
+
+function syncDirectory(path: string): void {
+  let descriptor: number | undefined
+  try {
+    descriptor = openSync(path, constants.O_RDONLY)
+    fsyncSync(descriptor)
+  } catch (error) {
+    /* v8 ignore next 3 -- Windows rejects directory handles on filesystems that cannot flush them. */
+    if (process.platform === 'win32'
+      && ['EACCES', 'EINVAL', 'ENOTSUP', 'EPERM'].some(code => isErrno(error, code))) return
+    /* v8 ignore next -- public callers cannot inject a directory flush fault. */
+    throw error
+  } finally {
+    /* v8 ignore next -- false only when opening the directory failed before acquiring a handle. */
+    if (descriptor !== undefined) closeSync(descriptor)
+  }
+}
+
+/**
+ * Create a Profile-owned directory tree and prove every component entry durable, including an `EEXIST` race winner.
+ * @param path - complete directory path to create or confirm.
+ * @param options - creation mode and owner-specific invalid-component diagnostic.
+ */
+export function ensureDurableProfileDirectory(path: string, options: DurableProfileDirectoryOptions): void {
+  const pending: string[] = []
+  for (let current = resolve(path); dirname(current) !== current; current = dirname(current)) pending.push(current)
+  for (const directory of pending.reverse()) {
+    try {
+      if (options.mode === undefined) mkdirSync(directory)
+      else mkdirSync(directory, { mode: options.mode })
+    } catch (error) {
+      if (!isErrno(error, 'EEXIST')) throw error
+      if (!statSync(directory).isDirectory()) throw options.notDirectory(directory)
+    }
+    syncDirectory(dirname(directory))
+  }
+}
+
+const APP_PROFILE_DIRECTORY_OPTIONS: DurableProfileDirectoryOptions = {
+  notDirectory: directory => new Error(`dsh: durable directory component ${directory} is not a directory`),
+}
+
+function mkdirDurable(path: string): void {
+  ensureDurableProfileDirectory(path, APP_PROFILE_DIRECTORY_OPTIONS)
+}
+
+/** Publish complete bytes from a durable same-directory temporary file without replacing a pathname. */
+function writeProfileFileAtomic(path: string, content: string): boolean {
+  const incarnationFingerprint = processIncarnationFingerprint(currentProcessIncarnation())
+  const temporary = join(
+    dirname(path),
+    `.${basename(path)}.${String(process.pid)}.${incarnationFingerprint}.${randomUUID()}.tmp`,
+  )
+  let descriptor: number | undefined
+  try {
+    descriptor = openSync(temporary, constants.O_CREAT | constants.O_EXCL | constants.O_WRONLY, 0o600)
+    writeFileSync(descriptor, content, 'utf8')
+    fsyncSync(descriptor)
+    closeSync(descriptor)
+    descriptor = undefined
+    try {
+      linkSync(temporary, path)
+    } catch (error) {
+      /* v8 ignore next -- only a concurrent initializer can enter this publication race. */
+      if (!isErrno(error, 'EEXIST')) throw error
+      /* v8 ignore next -- the same race returns after preserving the winner's file. */
+      return false
+    }
+    unlinkSync(temporary)
+    syncDirectory(dirname(path))
+    return true
+  } finally {
+    /* v8 ignore next -- only a synchronous write/fsync fault leaves the temporary descriptor open. */
+    if (descriptor !== undefined) closeSync(descriptor)
+    try {
+      unlinkSync(temporary)
+    } catch (error) {
+      /* v8 ignore next -- cleanup may ignore only a temporary already published or removed. */
+      if (!isErrno(error, 'ENOENT')) throw error
+    }
+  }
+}
+
+function profileManifestTemplate(dir: string, bundles: readonly string[]): string {
+  const manifest: ProfileManifest & { private: boolean } = {
+    name: `dsh-profile-${basename(dir)}`,
+    private: true,
+    dependencies: {},
+    dsh: { profile: { bundles: [...bundles] } },
+  }
+  return `${JSON.stringify(manifest, undefined, 2)}\n`
+}
+
+function profileTemplateFiles(dir: string, bundles: readonly string[]): readonly ProfileTemplateFile[] {
+  return [
+    { name: 'package.json', content: profileManifestTemplate(dir, bundles) },
+    { name: PROFILE_PATCH_FILENAME, content: PROFILE_PATCH_TEMPLATE },
+    { name: 'pnpm-workspace.yaml', content: PROFILE_PNPM_WORKSPACE },
+    { name: 'pnpm-lock.yaml', content: PROFILE_PNPM_LOCK },
+  ]
+}
+
+function isInterruptedTemplate(raw: string, expected: string): boolean {
+  return raw.length < expected.length && expected.startsWith(raw)
+}
+
+function processIncarnationFingerprint(incarnation: ProcessIncarnation): string {
+  return createHash('sha256').update(incarnation).digest('hex')
+}
+
+function profileAtomicTemporaryOwner(
+  name: string,
+  basenames: readonly string[],
+): ProfileAtomicTemporaryOwner | undefined {
+  for (const basename of basenames) {
+    const prefix = `.${basename}.`
+    if (!name.startsWith(prefix) || !name.endsWith('.tmp')) continue
+    const [owner, incarnationFingerprint, token, extra] = name.slice(prefix.length, -4).split('.')
+    if (extra !== undefined || owner === undefined || incarnationFingerprint === undefined || token === undefined
+      || !/^[1-9]\d*$/.test(owner)
+      || !/^[0-9a-f]{64}$/.test(incarnationFingerprint)
+      || !/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(token)) {
+      return undefined
+    }
+    const parsed = Number(owner)
+    return Number.isSafeInteger(parsed) ? { pid: parsed, incarnationFingerprint } : undefined
+  }
+  return undefined
+}
+
+function canResumeInitialization(
+  dir: string,
+  files: readonly ProfileTemplateFile[],
+): boolean {
+  const owned = new Map(files.map(file => [file.name, file.content]))
+  for (const name of readdirSync(dir)) {
+    const expected = owned.get(name)
+    if (expected === undefined) return false
+    const raw = readFileSync(join(dir, name), 'utf8')
+    if (raw === expected) continue
+    return false
+  }
+  return files.some(file => !existsSync(join(dir, file.name)))
+}
+
+/** Remove recognized dead-owner residue while boundedly waiting for exact live owners. */
+function settleProfileTemporaries(
+  dir: string,
+  files: readonly ProfileTemplateFile[],
+  deadline: number,
+): void {
+  const basenames = files.map(file => file.name)
+  for (;;) {
+    let removed = false
+    let liveOwner: number | undefined
+    for (const name of readdirSync(dir)) {
+      const owner = profileAtomicTemporaryOwner(name, basenames)
+      if (owner === undefined) continue
+      const liveIncarnation = readProcessIncarnation(owner.pid)
+      if (liveIncarnation !== null
+        && processIncarnationFingerprint(liveIncarnation) === owner.incarnationFingerprint) {
+        liveOwner ??= owner.pid
+        continue
+      }
+      try {
+        unlinkSync(join(dir, name))
+        removed = true
+      } catch (error) {
+        /* v8 ignore next -- an external cleanup may remove the same dead-owner temporary first. */
+        if (!isErrno(error, 'ENOENT')) throw error
+      }
+    }
+    if (removed) syncDirectory(dir)
+    if (liveOwner === undefined) return
+    if (Date.now() >= deadline) {
+      throw new Error(`dsh: Profile initialization for ${dir} is still owned by process ${String(liveOwner)}`)
+    }
+    Atomics.wait(PROFILE_INITIALIZATION_WAIT, 0, 0, 10)
+  }
+}
+
+/** Serialize initialization and recovery through an OS-released SQLite writer lease. */
+function withProfileInitializationCoordinator<T>(dir: string, operation: () => T): T {
+  const coordinatorDir = join(dirname(dir), PROFILE_TRANSACTION_ROOT, basename(dir))
+  mkdirDurable(coordinatorDir)
+  const { DatabaseSync } = createRequire(import.meta.url)('node:sqlite') as typeof import('node:sqlite')
+  const database = new DatabaseSync(join(coordinatorDir, PROFILE_INITIALIZATION_COORDINATOR))
+  let transactionOpen = false
+  let hasPrimaryFailure = false
+  let primaryFailure: unknown
+  try {
+    database.exec(`PRAGMA busy_timeout = ${String(PROFILE_INITIALIZATION_WAIT_MS)}`)
+    database.exec('PRAGMA journal_mode = DELETE')
+    database.exec('PRAGMA synchronous = FULL')
+    database.exec('BEGIN IMMEDIATE')
+    transactionOpen = true
+    const result = operation()
+    database.exec('COMMIT')
+    transactionOpen = false
+    return result
+  } catch (error) {
+    hasPrimaryFailure = true
+    primaryFailure = error
+    throw error
+  } finally {
+    const cleanupFailures: unknown[] = []
+    if (transactionOpen) {
+      try {
+        database.exec('ROLLBACK')
+      } catch (error) {
+        cleanupFailures.push(error)
+      }
+    }
+    try {
+      database.close()
+    } catch (error) {
+      cleanupFailures.push(error)
+    }
+    if (cleanupFailures.length > 0) {
+      throw new AggregateError(
+        hasPrimaryFailure ? [primaryFailure, ...cleanupFailures] : cleanupFailures,
+        'dsh: Profile initialization failed to release its coordinator',
+        { cause: primaryFailure },
+      )
+    }
+  }
+}
+
+const PROFILE_INITIALIZATION_WAIT = new Int32Array(new SharedArrayBuffer(4))
+const PROFILE_INITIALIZATION_WAIT_MS = 10_000
+
+function requiresProfileInitialization(
+  dir: string,
+  files: readonly ProfileTemplateFile[],
+): boolean {
+  const deadline = Date.now() + PROFILE_INITIALIZATION_WAIT_MS
+  settleProfileTemporaries(dir, files, deadline)
+  const requiresRecovery = files.some((file) => {
+    const path = join(dir, file.name)
+    return !existsSync(path) || isInterruptedTemplate(readFileSync(path, 'utf8'), file.content)
+  })
+  if (!requiresRecovery) return false
+  if (!canResumeInitialization(dir, files)) {
+    throw new Error(
+      `dsh: Profile ${dir} is missing initialization files but contains user-owned content; repair it manually`,
+    )
+  }
+  return true
+}
+
 /**
  * Initialize a profile directory: manifest, empty user patch layer, and the
- * pnpm settings out-of-tree plugins need. Existing files are never touched,
- * so re-running is a no-op on an initialized profile.
+ * pnpm settings out-of-tree plugins need. Each template file becomes visible
+ * only with complete, flushed bytes. An OS-released writer lease permits retry
+ * to publish only missing companions from an exact template subset; incomplete
+ * or unrelated existing bytes are never overwritten and require manual inspection.
  * @param dir - the profile directory from {@link resolveProfileDir}.
  * @param bundles - the initial `dsh.profile.bundles` layer list.
  */
 export function initProfile(dir: string, bundles: readonly string[]): void {
-  mkdirSync(dir, { recursive: true })
-  const manifestPath = join(dir, 'package.json')
-  if (!existsSync(manifestPath)) {
-    const manifest: ProfileManifest & { private: boolean } = {
-      name: `dsh-profile-${basename(dir)}`,
-      private: true,
-      dependencies: {},
-      dsh: { profile: { bundles: [...bundles] } },
+  mkdirDurable(dir)
+  withProfileInitializationCoordinator(dir, () => {
+    const files = profileTemplateFiles(dir, bundles)
+    if (!requiresProfileInitialization(dir, files)) return
+    for (const file of files) {
+      const path = join(dir, file.name)
+      if (!existsSync(path)) {
+        /* v8 ignore next -- only an external pathname publisher can win while the coordinator is held. */
+        if (writeProfileFileAtomic(path, file.content)) continue
+      }
+      const raw = readFileSync(path, 'utf8')
+      if (raw === file.content) continue
+      throw new Error(`dsh: Profile initialization cannot replace incomplete, user-owned, or unrelated file ${path}`)
     }
-    writeFileSync(manifestPath, JSON.stringify(manifest, undefined, 2) + '\n')
+  })
+}
+
+function ensureEmptyProfileLock(binName: string, dir: string, manifest: ProfileManifest): void {
+  const path = join(dir, 'pnpm-lock.yaml')
+  if (existsSync(path)) return
+  if (Object.keys(manifest.dependencies ?? {}).length > 0) {
+    throw new Error(`${binName}: profile ${dir} has dependencies but no pnpm-lock.yaml; repair it before boot`)
   }
-  const patchPath = join(dir, PROFILE_PATCH_FILENAME)
-  if (!existsSync(patchPath)) writeFileSync(patchPath, PROFILE_PATCH_TEMPLATE)
-  const workspacePath = join(dir, 'pnpm-workspace.yaml')
-  if (!existsSync(workspacePath)) writeFileSync(workspacePath, PROFILE_PNPM_WORKSPACE)
+  writeProfileFileAtomic(path, PROFILE_PNPM_LOCK)
 }
 
 /** Ensure `link` is a symlink to `target`, replacing a wrong or dangling link; a real directory throws. */
@@ -295,8 +631,10 @@ function sameBundles(left: readonly string[], right: readonly string[]): boolean
  * while preserving every other manifest field. Any other list is user-owned.
  */
 function normalizeShippedProfile(name: string, dir: string, manifest: ProfileManifest): ProfileManifest {
-  const installationOwned = INSTALLATION_OWNED_PROFILE_TUPLES[name]
-  const current = PROFILE_TEMPLATES[name]
+  const installationOwned = Object.hasOwn(INSTALLATION_OWNED_PROFILE_TUPLES, name)
+    ? INSTALLATION_OWNED_PROFILE_TUPLES[name]
+    : undefined
+  const current = Object.hasOwn(PROFILE_TEMPLATES, name) ? PROFILE_TEMPLATES[name] : undefined
   const bundles = manifest.dsh?.profile?.bundles
   if (installationOwned === undefined || current === undefined || bundles === undefined
     || !sameBundles(bundles, installationOwned)) return manifest
@@ -370,19 +708,28 @@ export function resolveBundleDir(
  */
 export function loadProfile(
   binName: string, name: string, installAnchor: string, home: string = resolveDshHome(),
-  options: { userLayer?: boolean } = {},
+  options: LoadProfileOptions = {},
 ): Profile {
-  const dir = resolveProfileDir(name, home)
-  if (!existsSync(join(dir, 'package.json'))) {
-    const template = PROFILE_TEMPLATES[name]
-    if (template === undefined) {
+  const dir = options.profileDir === undefined ? resolveProfileDir(name, home) : resolve(options.profileDir)
+  if (options.profileDir === undefined && options.readOnly !== true) {
+    const template = Object.hasOwn(PROFILE_TEMPLATES, name) ? PROFILE_TEMPLATES[name] : undefined
+    if (template !== undefined) {
+      initProfile(dir, template)
+    } else if (!existsSync(join(dir, 'package.json'))) {
       throw new Error(
-        `${binName}: profile ${JSON.stringify(name)} does not exist; create it with 'dsh plugin --profile ${name} add <package>'`,
+        `${binName}: profile ${JSON.stringify(name)} does not exist; P0 auto-initializes only "web" and "headless"; `
+        + `run '${binName} plugin --profile ${name} install <artifact.tgz>' to create it transactionally, `
+        + 'or create a complete custom Profile directory before boot',
       )
     }
-    initProfile(dir, template)
+  } else if (!existsSync(join(dir, 'package.json'))) {
+    throw new Error(`${binName}: complete Profile generation ${dir} has no package.json`)
   }
-  const manifest = normalizeShippedProfile(name, dir, readProfileManifest(binName, dir))
+  const parsedManifest = readProfileManifest(binName, dir)
+  if (options.readOnly !== true) ensureEmptyProfileLock(binName, dir, parsedManifest)
+  const manifest = options.readOnly === true
+    ? parsedManifest
+    : normalizeShippedProfile(name, dir, parsedManifest)
   // A hand-written profile manifest may omit the dsh section entirely.
   const bundles = manifest.dsh?.profile?.bundles ?? []
   const layers = bundles.map((packageName): ProfileLayer => {

@@ -44,7 +44,7 @@ export function createTransport(config: Config): Transport {
       // object, so the cast records only that widening.
       return new StreamableHTTPClientTransport(
         new URL(config.url),
-        { requestInit: { headers: config.headers } },
+        { requestInit: { headers: config.headers, redirect: config.redirect } },
       ) as Transport
   }
 }

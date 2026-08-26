@@ -31,11 +31,14 @@ declare module '@deepseek-ai/cordis' {
 export {
   composeEntries,
   DEFAULT_PROFILE_BUNDLES,
+  ensureDurableProfileDirectory,
   healProfilesModuleFallback,
   initProfile,
   loadProfile,
   PROFILE_PATCH_FILENAME,
+  PROFILE_ROOT_FILENAME,
   PROFILE_TEMPLATES,
+  PROFILE_TRANSACTION_ROOT,
   PROFILES_DIR,
   readProfileManifest,
   resolveBundleDir,
@@ -44,6 +47,7 @@ export {
   type DshBundleManifest,
   type DshManifestSection,
   type DshProfileManifest,
+  type DurableProfileDirectoryOptions,
   type Profile,
   type ProfileLayer,
   type ProfileManifest,
@@ -479,6 +483,8 @@ function groupedDump(
  * @param patches - initial app and user patches, applied in order.
  * @param bareModuleBaseUrl - optional installed-host base for bare package
  * names; relative names continue to resolve beside the configuration file.
+ * @param rootBaseUrl - optional directory that anchors relative entries even
+ * when the synthetic root file lives elsewhere.
  * @returns the created root Include entry, or `undefined` when a surface
  * disposed the whole tree (taking the Loader service with it) while the
  * transactional create was still settling entry lifecycle.
@@ -488,11 +494,18 @@ export async function mountRootInclude(
   absoluteConfigPath: string,
   patches: readonly PatchOptions[] = [],
   bareModuleBaseUrl?: string,
+  rootBaseUrl?: string,
 ): Promise<Entry | undefined> {
-  ctx.loader.builtins.include = bareModuleBaseUrl === undefined
+  ctx.loader.builtins.include = bareModuleBaseUrl === undefined && rootBaseUrl === undefined
     ? Include
-    : class HostResolvedRootInclude extends Include {
+    : class ResolvedRootInclude extends Include {
+      constructor(includeCtx: Context, config: Include.Config) {
+        super(includeCtx, config)
+        if (rootBaseUrl !== undefined) this.ctx.baseUrl = pathToFileURL(rootBaseUrl).href + '/'
+      }
+
       override import(name: string, getOuterStack?: () => string[]): unknown {
+        if (bareModuleBaseUrl === undefined) return super.import(name, getOuterStack)
         const specifier = isAbsolute(name) ? pathToFileURL(name).href : name
         if (name.startsWith('.') || name.startsWith('cordis:')) return super.import(specifier, getOuterStack)
         const internal = this.ctx.loader.internal
@@ -748,6 +761,8 @@ export async function assertEntriesActivated(ctx: Context, binName: string): Pro
  * @param bareModuleBaseUrl - optional installed-host base for bare package
  * names; use it when the host, rather than the configuration project, owns the
  * complete plugin set.
+ * @param rootBaseUrl - optional directory that anchors relative Loader entries
+ * when the launcher-owned root file must live elsewhere.
  * @returns the root context once every entry has started, or as soon as a
  * surface disposed the tree while startup was still in flight.
  * @throws a labelled error after disposing the partial context — `host
@@ -760,18 +775,19 @@ export async function boot(
   patches?: PatchOptions[],
   prepare?: (ctx: Context) => Promise<void> | void,
   bareModuleBaseUrl?: string,
+  rootBaseUrl?: string,
 ): Promise<Context> {
   const ctx = new Context()
   // Two failure labels: `prepare` runs before any config-tree entry mounts,
   // so its failure is host setup, not the plugin tree.
   let stage = 'host preparation failed'
   try {
-    ctx.baseUrl = pathToFileURL(dirname(absoluteConfigPath)).href + '/'
+    ctx.baseUrl = pathToFileURL(rootBaseUrl ?? dirname(absoluteConfigPath)).href + '/'
     ctx.provide('dshHomePath', dshHomePath)
     await ctx.plugin(Loader)
     await prepare?.(ctx)
     stage = 'plugin tree failed to load'
-    await mountRootInclude(ctx, absoluteConfigPath, patches, bareModuleBaseUrl)
+    await mountRootInclude(ctx, absoluteConfigPath, patches, bareModuleBaseUrl, rootBaseUrl)
     // A surface can finish and dispose the whole tree while startup is still
     // in flight, before the last entry settles. The Loader service goes with
     // it, and the activation audit describes a live tree — reading `ctx.loader`

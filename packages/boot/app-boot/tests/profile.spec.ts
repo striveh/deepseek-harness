@@ -4,10 +4,21 @@
  * empty-root composition, and the installation module-fallback healing.
  */
 
-import { lstatSync, mkdirSync, mkdtempSync, readFileSync, readlinkSync, rmSync, symlinkSync, writeFileSync } from 'node:fs'
+import { execFile, spawn } from 'node:child_process'
+import { createHash } from 'node:crypto'
+import fs, {
+  existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, rmSync, symlinkSync,
+  writeFileSync,
+} from 'node:fs'
+import Module, { syncBuiltinESMExports } from 'node:module'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { describe, expect, it } from 'vitest'
+import { promisify } from 'node:util'
+import { describe, expect, it, vi } from 'vitest'
+import {
+  currentProcessIncarnation,
+  type ProcessIncarnation,
+} from '@deepseek-ai/dsh-native-command'
 import {
   composeEntries,
   healProfilesModuleFallback,
@@ -15,6 +26,7 @@ import {
   loadProfile,
   PROFILE_PATCH_FILENAME,
   PROFILE_TEMPLATES,
+  PROFILE_TRANSACTION_ROOT,
   readProfileManifest,
   resolveBundleDir,
   resolveProfileDir,
@@ -22,6 +34,13 @@ import {
 } from '../src/index.ts'
 
 const tmp = (): string => mkdtempSync(join(tmpdir(), 'dsh-profile-'))
+const execFileAsync = promisify(execFile)
+const ownIncarnation = currentProcessIncarnation()
+const deadIncarnation = 'linux:00000000-0000-0000-0000-000000000000:1' as ProcessIncarnation
+
+function incarnationFingerprint(incarnation: ProcessIncarnation): string {
+  return createHash('sha256').update(incarnation).digest('hex')
+}
 
 /** Stage a fake installed app: package.json with deps and a node_modules holding bundles. */
 function stageInstallation(bundles: Record<string, { patch?: string; deps?: Record<string, string> }>): string {
@@ -49,13 +68,39 @@ describe('resolveProfileDir', () => {
   it('joins the home and rejects traversal-shaped names', () => {
     const home = tmp()
     expect(resolveProfileDir('tui', home)).toBe(join(home, 'profiles', 'tui'))
-    for (const bad of ['', '.', '..', 'a/b', 'a\\b']) {
+    for (const bad of ['', '.', '..', 'a/b', 'a\\b', 'node_modules', PROFILE_TRANSACTION_ROOT]) {
       expect(() => resolveProfileDir(bad, home)).toThrow('invalid profile name')
     }
   })
 })
 
 describe('initProfile', () => {
+  it('rejects a non-directory component in the durable Profile path', () => {
+    const home = tmp()
+    writeFileSync(join(home, 'profiles'), 'not a directory')
+
+    expect(() => { initProfile(resolveProfileDir('blocked', home), ['@deepseek-ai/dsh-base']) })
+      .toThrow('durable directory component')
+  })
+
+  it('propagates a durable Profile directory creation failure', () => {
+    const home = tmp()
+    const dir = resolveProfileDir('denied', home)
+    const originalMkdirSync = fs.mkdirSync
+    fs.mkdirSync = (path, ...args) => {
+      if (String(path) === dir) throw Object.assign(new Error('mkdir denied'), { code: 'EACCES' })
+      return Reflect.apply(originalMkdirSync, fs, [path, ...args])
+    }
+    syncBuiltinESMExports()
+
+    try {
+      expect(() => { initProfile(dir, ['@deepseek-ai/dsh-base']) }).toThrow('mkdir denied')
+    } finally {
+      fs.mkdirSync = originalMkdirSync
+      syncBuiltinESMExports()
+    }
+  })
+
   it('creates manifest, user patch layer, and pnpm workspace once, never overwriting', () => {
     const home = tmp()
     const dir = resolveProfileDir('tui', home)
@@ -69,6 +114,441 @@ describe('initProfile', () => {
     initProfile(dir, ['other'])
     expect(readProfileManifest('t', dir).dsh?.profile?.bundles).toEqual(['@deepseek-ai/dsh-base'])
     expect(readFileSync(join(dir, PROFILE_PATCH_FILENAME), 'utf8')).toContain('- id: x')
+  })
+
+  it('fsyncs the parent entry even when another process already published each directory', () => {
+    const home = tmp()
+    const dir = resolveProfileDir('existing-directory', home)
+    mkdirSync(dir, { recursive: true })
+    const originalOpenSync = fs.openSync
+    const originalFsyncSync = fs.fsyncSync
+    const opened = new Map<number, string>()
+    const syncedDirectories: string[] = []
+    fs.openSync = (path, ...args) => {
+      const descriptor = Reflect.apply(originalOpenSync, fs, [path, ...args])
+      opened.set(descriptor, String(path))
+      return descriptor
+    }
+    fs.fsyncSync = (descriptor) => {
+      const path = opened.get(descriptor)
+      if (path !== undefined) syncedDirectories.push(path)
+      Reflect.apply(originalFsyncSync, fs, [descriptor])
+    }
+    syncBuiltinESMExports()
+
+    try {
+      initProfile(dir, ['@deepseek-ai/dsh-base'])
+    } finally {
+      fs.openSync = originalOpenSync
+      fs.fsyncSync = originalFsyncSync
+      syncBuiltinESMExports()
+    }
+
+    expect(syncedDirectories).toContain(join(home, 'profiles'))
+  })
+
+  it('preserves interrupted template prefixes and requires manual inspection', () => {
+    for (const [filename, retainedBytes] of [
+      ['package.json', 1],
+      [PROFILE_PATCH_FILENAME, 0],
+      ['pnpm-workspace.yaml', 9],
+      ['pnpm-lock.yaml', 0],
+    ] as const) {
+      const dir = resolveProfileDir(`interrupted-${filename.replaceAll('.', '-')}`, tmp())
+      initProfile(dir, ['@deepseek-ai/dsh-base'])
+      const path = join(dir, filename)
+      const complete = readFileSync(path, 'utf8')
+      writeFileSync(path, complete.slice(0, retainedBytes))
+
+      expect(() => { initProfile(dir, ['@deepseek-ai/dsh-base']) })
+        .toThrow('contains user-owned content')
+      expect(readFileSync(path, 'utf8'), filename).toBe(complete.slice(0, retainedBytes))
+    }
+  })
+
+  it('resumes an exact published template subset without a shared marker', () => {
+    const dir = resolveProfileDir('published-subset', tmp())
+    initProfile(dir, ['@deepseek-ai/dsh-base'])
+    for (const file of [PROFILE_PATCH_FILENAME, 'pnpm-workspace.yaml', 'pnpm-lock.yaml']) rmSync(join(dir, file))
+
+    initProfile(dir, ['@deepseek-ai/dsh-base'])
+
+    expect(readFileSync(join(dir, PROFILE_PATCH_FILENAME), 'utf8')).toContain('[]')
+    expect(readFileSync(join(dir, 'pnpm-workspace.yaml'), 'utf8')).toContain('nodeLinker: hoisted')
+    expect(readFileSync(join(dir, 'pnpm-lock.yaml'), 'utf8')).toContain("lockfileVersion: '9.0'")
+  })
+
+  it('preserves valid user files and refuses to classify their damaged companion as first-init residue', () => {
+    const dir = resolveProfileDir('user-owned', tmp())
+    initProfile(dir, ['@deepseek-ai/dsh-base'])
+    const manifestPath = join(dir, 'package.json')
+    const manifest = `${JSON.stringify({
+      name: 'user-owned-profile',
+      private: true,
+      dependencies: {},
+      dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } },
+      userField: 'keep',
+    }, null, 2)}\n`
+    writeFileSync(manifestPath, manifest)
+    writeFileSync(join(dir, PROFILE_PATCH_FILENAME), '')
+
+    expect(() => { initProfile(dir, ['@deepseek-ai/dsh-base']) }).toThrow('contains user-owned content')
+    expect(readFileSync(manifestPath, 'utf8')).toBe(manifest)
+    expect(readFileSync(join(dir, PROFILE_PATCH_FILENAME), 'utf8')).toBe('')
+  })
+
+  it('does not replace an unrelated damaged file while recovering a missing companion', () => {
+    const dir = resolveProfileDir('recovering-user-owned', tmp())
+    initProfile(dir, ['@deepseek-ai/dsh-base'])
+    writeFileSync(join(dir, 'pnpm-lock.yaml'), 'unrelated damage')
+    rmSync(join(dir, 'pnpm-workspace.yaml'))
+
+    expect(() => { initProfile(dir, ['@deepseek-ai/dsh-base']) })
+      .toThrow('contains user-owned content')
+    expect(readFileSync(join(dir, 'pnpm-lock.yaml'), 'utf8')).toBe('unrelated damage')
+    expect(existsSync(join(dir, 'pnpm-workspace.yaml'))).toBe(false)
+  })
+
+  it('rejects a conflicting file published after the initialization snapshot', () => {
+    const dir = resolveProfileDir('publication-race', tmp())
+    const originalLinkSync = fs.linkSync
+    let injected = false
+    fs.linkSync = (existingPath, newPath) => {
+      if (!injected) {
+        injected = true
+        writeFileSync(newPath, 'user-owned winner')
+      }
+      Reflect.apply(originalLinkSync, fs, [existingPath, newPath])
+    }
+    syncBuiltinESMExports()
+
+    try {
+      expect(() => { initProfile(dir, ['@deepseek-ai/dsh-base']) })
+        .toThrow('cannot replace incomplete, user-owned, or unrelated file')
+    } finally {
+      fs.linkSync = originalLinkSync
+      syncBuiltinESMExports()
+    }
+
+    expect(readFileSync(join(dir, 'package.json'), 'utf8')).toBe('user-owned winner')
+  })
+
+  it('preserves coordinator operation, rollback, and close failures in order', () => {
+    const dir = resolveProfileDir('coordinator-cleanup-failures', tmp())
+    mkdirSync(dir, { recursive: true })
+    writeFileSync(join(dir, 'user-note.txt'), 'keep')
+    const originalCreateRequire = Module.createRequire
+    class FaultingDatabase {
+      exec(statement: string): void {
+        if (statement === 'ROLLBACK') throw new Error('rollback failed')
+      }
+
+      close(): void {
+        throw new Error('close failed')
+      }
+    }
+    Module.createRequire = (() => ((specifier: string) => {
+      if (specifier !== 'node:sqlite') throw new Error(`unexpected require ${specifier}`)
+      return { DatabaseSync: FaultingDatabase }
+    })) as unknown as typeof Module.createRequire
+    syncBuiltinESMExports()
+
+    try {
+      let thrown: unknown
+      try {
+        initProfile(dir, ['@deepseek-ai/dsh-base'])
+      } catch (error) {
+        thrown = error
+      }
+      expect(thrown).toBeInstanceOf(AggregateError)
+      const aggregate = thrown as AggregateError
+      expect(aggregate.errors.map(error => String(error))).toEqual([
+        expect.stringContaining('contains user-owned content'),
+        'Error: rollback failed',
+        'Error: close failed',
+      ])
+      expect(String(aggregate.cause)).toContain('contains user-owned content')
+    } finally {
+      Module.createRequire = originalCreateRequire
+      syncBuiltinESMExports()
+    }
+  })
+
+  it('reports a coordinator close failure after a successful commit', () => {
+    const dir = resolveProfileDir('coordinator-close-failure', tmp())
+    const originalCreateRequire = Module.createRequire
+    class CloseFailingDatabase {
+      exec(): void {}
+
+      close(): void {
+        throw new Error('close failed')
+      }
+    }
+    Module.createRequire = (() => (() => ({ DatabaseSync: CloseFailingDatabase }))) as unknown as typeof Module.createRequire
+    syncBuiltinESMExports()
+
+    try {
+      let thrown: unknown
+      try {
+        initProfile(dir, ['@deepseek-ai/dsh-base'])
+      } catch (error) {
+        thrown = error
+      }
+      expect(thrown).toBeInstanceOf(AggregateError)
+      expect((thrown as AggregateError).errors.map(error => String(error))).toEqual(['Error: close failed'])
+      expect((thrown as AggregateError).cause).toBeUndefined()
+    } finally {
+      Module.createRequire = originalCreateRequire
+      syncBuiltinESMExports()
+    }
+  })
+
+  it('removes dead-owner companion temporaries before exact-subset recovery', () => {
+    const dir = resolveProfileDir('dead-owner', tmp())
+    initProfile(dir, ['@deepseek-ai/dsh-base'])
+    rmSync(join(dir, 'pnpm-lock.yaml'))
+    const abandoned = join(
+      dir,
+      `.pnpm-lock.yaml.2147483647.${incarnationFingerprint(deadIncarnation)}.00000000-0000-4000-8000-000000000000.tmp`,
+    )
+    writeFileSync(abandoned, "lockfileVersion: '9.0'\n")
+
+    initProfile(dir, ['@deepseek-ai/dsh-base'])
+
+    expect(readFileSync(join(dir, 'pnpm-lock.yaml'), 'utf8')).toContain("lockfileVersion: '9.0'")
+    expect(existsSync(abandoned)).toBe(false)
+
+    const completedResidue = join(
+      dir,
+      `.pnpm-lock.yaml.2147483647.${incarnationFingerprint(deadIncarnation)}.00000000-0000-4000-8000-000000000001.tmp`,
+    )
+    writeFileSync(completedResidue, 'abandoned after final publication')
+    initProfile(dir, ['@deepseek-ai/dsh-base'])
+    expect(existsSync(completedResidue)).toBe(false)
+
+    const foreignDir = resolveProfileDir('dead-owner-foreign-temp', tmp())
+    initProfile(foreignDir, ['@deepseek-ai/dsh-base'])
+    rmSync(join(foreignDir, 'pnpm-lock.yaml'))
+    const foreign = join(
+      foreignDir,
+      `.pnpm-lock.yaml.2147483646.${incarnationFingerprint(deadIncarnation)}.00000000-0000-4000-8000-000000000000.tmp`,
+    )
+    writeFileSync(foreign, 'recognized dead-owner residue')
+    initProfile(foreignDir, ['@deepseek-ai/dsh-base'])
+    expect(existsSync(foreign)).toBe(false)
+  })
+
+  it('removes a companion temporary whose live PID belongs to a different incarnation', async () => {
+    const dir = resolveProfileDir('reused-pid-owner', tmp())
+    initProfile(dir, ['@deepseek-ai/dsh-base'])
+    const liveProcess = spawn(process.execPath, ['--eval', 'setInterval(() => {}, 1000)'])
+    await new Promise<void>((resolvePromise, reject) => {
+      liveProcess.once('spawn', resolvePromise)
+      liveProcess.once('error', reject)
+    })
+    const livePid = liveProcess.pid
+    if (livePid === undefined) throw new Error('spawned process has no PID')
+    try {
+      rmSync(join(dir, 'pnpm-lock.yaml'))
+      const stale = join(
+        dir,
+        `.pnpm-lock.yaml.${String(livePid)}.${incarnationFingerprint(deadIncarnation)}.00000000-0000-4000-8000-000000000000.tmp`,
+      )
+      writeFileSync(stale, 'stale incarnation')
+
+      initProfile(dir, ['@deepseek-ai/dsh-base'])
+
+      expect(readFileSync(join(dir, 'pnpm-lock.yaml'), 'utf8')).toContain("lockfileVersion: '9.0'")
+      expect(existsSync(stale)).toBe(false)
+    } finally {
+      liveProcess.kill()
+    }
+  })
+
+  it('waits for a live companion temporary and removes an abandoned companion temporary', async () => {
+    const liveDir = resolveProfileDir('live-companion', tmp())
+    mkdirSync(liveDir, { recursive: true })
+    const nativeCommandSource = new URL('../../../util/native-command/src/index.ts', import.meta.url).href
+    const liveRemover = spawn(process.execPath, ['--import', 'tsx/esm', '--input-type=module', '--eval', [
+      `import { currentProcessIncarnation } from ${JSON.stringify(nativeCommandSource)}`,
+      'import { createHash } from \'node:crypto\'',
+      'import { join } from \'node:path\'',
+      'import { unlinkSync, writeFileSync } from \'node:fs\'',
+      'const token = \'00000000-0000-4000-8000-000000000001\'',
+      'const fingerprint = createHash(\'sha256\').update(currentProcessIncarnation()).digest(\'hex\')',
+      'const path = join(process.argv[1], \'.pnpm-lock.yaml.\' + process.pid + \'.\' + fingerprint + \'.\' + token + \'.tmp\')',
+      'writeFileSync(path, \'companion\')',
+      'setTimeout(() => unlinkSync(path), 100)',
+    ].join(';'), liveDir])
+    const liveExited = new Promise<void>((resolvePromise, reject) => {
+      liveRemover.once('exit', (code) => {
+        if (code === 0) resolvePromise()
+        else reject(new Error(`remover exited ${String(code)}`))
+      })
+    })
+    let liveTemporary: string | undefined
+    while (liveTemporary === undefined) {
+      const name = readdirSync(liveDir).find(candidate => candidate.startsWith(
+        `.pnpm-lock.yaml.${String(liveRemover.pid)}.`,
+      ))
+      if (name !== undefined) liveTemporary = join(liveDir, name)
+      else {
+        await new Promise<void>((resolvePromise) => { setTimeout(resolvePromise, 5) })
+      }
+    }
+    initProfile(liveDir, ['@deepseek-ai/dsh-base'])
+    await liveExited
+
+    const deadDir = resolveProfileDir('dead-companion', tmp())
+    initProfile(deadDir, ['@deepseek-ai/dsh-base'])
+    rmSync(join(deadDir, PROFILE_PATCH_FILENAME))
+    const abandoned = join(
+      deadDir,
+      `.cordis.patch.yml.2147483647.${incarnationFingerprint(deadIncarnation)}.00000000-0000-4000-8000-000000000000.tmp`,
+    )
+    writeFileSync(abandoned, 'companion')
+    initProfile(deadDir, ['@deepseek-ai/dsh-base'])
+    expect(existsSync(abandoned)).toBe(false)
+  })
+
+  it('times out while a live owner retains a companion temporary', () => {
+    const dir = resolveProfileDir('stalled-live-companion', tmp())
+    mkdirSync(dir, { recursive: true })
+    const temporary = join(
+      dir,
+      `.pnpm-lock.yaml.${String(process.pid)}.${incarnationFingerprint(ownIncarnation)}.00000000-0000-4000-8000-000000000000.tmp`,
+    )
+    writeFileSync(temporary, 'companion')
+    const now = vi.spyOn(Date, 'now').mockReturnValueOnce(0).mockReturnValue(Number.MAX_SAFE_INTEGER)
+
+    try {
+      expect(() => { initProfile(dir, ['@deepseek-ai/dsh-base']) })
+        .toThrow(`is still owned by process ${String(process.pid)}`)
+      expect(readFileSync(temporary, 'utf8')).toBe('companion')
+    } finally {
+      now.mockRestore()
+    }
+  })
+
+  it('waits for a live owner to remove its companion temporary', () => {
+    const dir = resolveProfileDir('departing-live-companion', tmp())
+    mkdirSync(dir, { recursive: true })
+    const temporary = join(
+      dir,
+      `.pnpm-lock.yaml.${String(process.pid)}.${incarnationFingerprint(ownIncarnation)}.00000000-0000-4000-8000-000000000000.tmp`,
+    )
+    writeFileSync(temporary, 'companion')
+    const wait = vi.spyOn(Atomics, 'wait').mockImplementationOnce(() => {
+      rmSync(temporary)
+      return 'ok'
+    })
+
+    try {
+      initProfile(dir, ['@deepseek-ai/dsh-base'])
+      expect(wait).toHaveBeenCalledOnce()
+    } finally {
+      wait.mockRestore()
+    }
+  })
+
+  it('never treats malformed companion temporary names as installation state', () => {
+    const token = '00000000-0000-4000-8000-000000000000'
+    const fingerprint = '0'.repeat(64)
+    for (const [index, name] of [
+      `.pnpm-lock.yaml..${fingerprint}.${token}.tmp`,
+      '.pnpm-lock.yaml.123.tmp',
+      `.pnpm-lock.yaml.owner.${fingerprint}.${token}.tmp`,
+      `.pnpm-lock.yaml.123.not-a-fingerprint.${token}.tmp`,
+      `.pnpm-lock.yaml.123.${fingerprint}.not-a-uuid.tmp`,
+      `.pnpm-lock.yaml.999999999999999999999.${fingerprint}.${token}.tmp`,
+      `.pnpm-lock.yaml.123.${fingerprint}.${token}.extra.tmp`,
+    ].entries()) {
+      const dir = resolveProfileDir(`malformed-companion-${String(index)}`, tmp())
+      mkdirSync(dir, { recursive: true })
+      const path = join(dir, name)
+      writeFileSync(path, 'user')
+      expect(() => { initProfile(dir, ['@deepseek-ai/dsh-base']) }).toThrow('contains user-owned content')
+      expect(readFileSync(path, 'utf8')).toBe('user')
+    }
+  })
+
+  it('does not infer first initialization when the directory contains an unrelated entry', () => {
+    const dir = resolveProfileDir('unrelated-entry', tmp())
+    initProfile(dir, ['@deepseek-ai/dsh-base'])
+    writeFileSync(join(dir, PROFILE_PATCH_FILENAME), '')
+    writeFileSync(join(dir, 'user-note.txt'), 'keep\n')
+
+    expect(() => { initProfile(dir, ['@deepseek-ai/dsh-base']) }).toThrow('contains user-owned content')
+    expect(readFileSync(join(dir, PROFILE_PATCH_FILENAME), 'utf8')).toBe('')
+    expect(readFileSync(join(dir, 'user-note.txt'), 'utf8')).toBe('keep\n')
+  })
+
+  it('converges when concurrent processes initialize the same new Profile', async () => {
+    const dir = resolveProfileDir('concurrent', tmp())
+    const source = new URL('../src/profile.ts', import.meta.url).href
+    const program = `import { initProfile } from ${JSON.stringify(source)};`
+      + 'initProfile(process.argv[1], [\'@deepseek-ai/dsh-base\'])'
+
+    await Promise.all(Array.from({ length: 8 }, () => execFileAsync(process.execPath, [
+      '--import', 'tsx/esm', '--input-type=module', '--eval', program, dir,
+    ])))
+
+    expect(readProfileManifest('t', dir).dsh?.profile?.bundles).toEqual(['@deepseek-ai/dsh-base'])
+    expect(readFileSync(join(dir, PROFILE_PATCH_FILENAME), 'utf8')).toContain('[]')
+    expect(readFileSync(join(dir, 'pnpm-lock.yaml'), 'utf8')).toContain("lockfileVersion: '9.0'")
+  })
+
+  it('recovers after an initializer is killed with a companion temporary unpublished', async () => {
+    const dir = resolveProfileDir('killed-companion-owner', tmp())
+    const signal = join(tmp(), 'companion-ready')
+    const source = new URL('../src/profile.ts', import.meta.url).href
+    const program = [
+      "import fs from 'node:fs'",
+      "import { syncBuiltinESMExports } from 'node:module'",
+      "import { basename } from 'node:path'",
+      'const originalLinkSync = fs.linkSync',
+      'fs.linkSync = (existing, target) => {',
+      "  if (basename(target) === 'pnpm-lock.yaml') {",
+      "    fs.writeFileSync(process.argv[2], 'ready')",
+      '    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0)',
+      '  }',
+      '  return originalLinkSync(existing, target)',
+      '}',
+      'syncBuiltinESMExports()',
+      `const { initProfile } = await import(${JSON.stringify(source)})`,
+      "initProfile(process.argv[1], ['@deepseek-ai/dsh-base'])",
+    ].join('\n')
+    const child = spawn(process.execPath, [
+      '--import', 'tsx/esm', '--input-type=module', '--eval', program, dir, signal,
+    ])
+    let stderr = ''
+    child.stderr?.on('data', (chunk: Buffer) => { stderr += chunk.toString('utf8') })
+    const exited = new Promise<{ readonly code: number | null; readonly signal: NodeJS.Signals | null }>((resolveExit) => {
+      child.once('exit', (code, exitSignal) => { resolveExit({ code, signal: exitSignal }) })
+    })
+    const deadline = Date.now() + 10_000
+    try {
+      while (!existsSync(signal)) {
+        if (child.exitCode !== null || child.signalCode !== null) {
+          const result = await exited
+          throw new Error(`initializer exited before fault point (${JSON.stringify(result)}): ${stderr}`)
+        }
+        if (Date.now() >= deadline) throw new Error(`initializer did not reach fault point: ${stderr}`)
+        await new Promise<void>((resolveWait) => { setTimeout(resolveWait, 5) })
+      }
+      child.kill('SIGKILL')
+      expect((await exited).signal).toBe('SIGKILL')
+    } finally {
+      if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL')
+    }
+
+    expect(readdirSync(dir).some(name => name.endsWith('.tmp'))).toBe(true)
+    expect(existsSync(join(dir, 'pnpm-lock.yaml'))).toBe(false)
+
+    initProfile(dir, ['@deepseek-ai/dsh-base'])
+
+    expect(readFileSync(join(dir, 'pnpm-lock.yaml'), 'utf8')).toContain("lockfileVersion: '9.0'")
+    expect(readdirSync(dir).some(name => name.endsWith('.tmp'))).toBe(false)
   })
 })
 
@@ -147,7 +627,7 @@ describe('loadProfile', () => {
     const anchor = stageInstallation({})
     const home = tmp()
     expect(() => loadProfile('t', 'custom', anchor, home))
-      .toThrow('profile "custom" does not exist')
+      .toThrow('profile "custom" does not exist; P0 auto-initializes only "web" and "headless"; run \'t plugin --profile custom install <artifact.tgz>\' to create it transactionally, or create a complete custom Profile directory before boot')
     // The web template auto-initializes on first load. Bundle resolution
     // cannot be asserted to fail here: the source-plane test runner resolves
     // @deepseek-ai/* through tsconfig paths regardless of the staged anchor.
@@ -159,6 +639,46 @@ describe('loadProfile', () => {
     }
     expect(readProfileManifest('t', resolveProfileDir('web', home)).dsh?.profile?.bundles)
       .toEqual([...PROFILE_TEMPLATES.web ?? []])
+  })
+
+  it.each(['constructor', 'toString', '__proto__'])(
+    'treats inherited template-table key %s as a custom Profile name',
+    (name) => {
+      const anchor = stageInstallation({})
+      const home = tmp()
+      const dir = resolveProfileDir(name, home)
+      initProfile(dir, [])
+
+      expect(loadProfile('t', name, anchor, home)).toMatchObject({
+        name,
+        dir,
+        layers: [],
+      })
+      expect(readProfileManifest('t', dir).dsh?.profile?.bundles).toEqual([])
+    },
+  )
+
+  it('recovers a shipped Profile interrupted after package publication and rejects user-owned companions', () => {
+    const anchor = stageInstallation({
+      '@deepseek-ai/dsh-base': { patch: '[]\n' },
+      '@deepseek-ai/dsh-web-app': { patch: '[]\n' },
+    })
+    const bundles = PROFILE_TEMPLATES.web ?? []
+    const home = tmp()
+    const dir = resolveProfileDir('web', home)
+    initProfile(dir, bundles)
+    for (const file of [PROFILE_PATCH_FILENAME, 'pnpm-workspace.yaml', 'pnpm-lock.yaml']) rmSync(join(dir, file))
+
+    expect(loadProfile('t', 'web', anchor, home).layers.map(layer => layer.packageName)).toEqual([...bundles])
+    expect(readFileSync(join(dir, PROFILE_PATCH_FILENAME), 'utf8')).toContain('[]')
+    expect(readFileSync(join(dir, 'pnpm-workspace.yaml'), 'utf8')).toContain('nodeLinker: hoisted')
+    expect(readFileSync(join(dir, 'pnpm-lock.yaml'), 'utf8')).toContain("lockfileVersion: '9.0'")
+
+    writeFileSync(join(dir, PROFILE_PATCH_FILENAME), '# user owned\n[]\n')
+    rmSync(join(dir, 'pnpm-workspace.yaml'))
+    expect(() => loadProfile('t', 'web', anchor, home)).toThrow('contains user-owned content')
+    expect(readFileSync(join(dir, PROFILE_PATCH_FILENAME), 'utf8')).toBe('# user owned\n[]\n')
+    expect(existsSync(join(dir, 'pnpm-workspace.yaml'))).toBe(false)
   })
 
   it('normalizes only the exact installation-owned headless bundle tuple', () => {
@@ -194,6 +714,55 @@ describe('loadProfile', () => {
     const dir = resolveProfileDir('demo', home)
     initProfile(dir, ['not-a-bundle'])
     expect(() => loadProfile('t', 'demo', anchor, home)).toThrow('declares no dsh.bundle')
+  })
+
+  it('repairs a missing empty lock but rejects an unlocked profile with dependencies', () => {
+    const anchor = stageInstallation({})
+    const home = tmp()
+    const repairable = resolveProfileDir('repairable', home)
+    mkdirSync(repairable, { recursive: true })
+    writeProfileManifest(repairable, {
+      name: 'repairable',
+      dsh: { profile: { bundles: [] } },
+    })
+
+    expect(loadProfile('t', 'repairable', anchor, home).layers).toEqual([])
+    expect(readFileSync(join(repairable, 'pnpm-lock.yaml'), 'utf8')).toContain("lockfileVersion: '9.0'")
+
+    const unlocked = resolveProfileDir('unlocked', home)
+    mkdirSync(unlocked, { recursive: true })
+    writeProfileManifest(unlocked, {
+      name: 'unlocked',
+      dependencies: { plugin: '1.0.0' },
+      dsh: { profile: { bundles: [] } },
+    })
+    expect(() => loadProfile('t', 'unlocked', anchor, home))
+      .toThrow('has dependencies but no pnpm-lock.yaml')
+  })
+
+  it('loads an immutable complete generation without repairing it', () => {
+    const anchor = stageInstallation({})
+    const home = tmp()
+    const generation = join(tmp(), 'generation')
+    expect(() => loadProfile('t', 'web', anchor, home, {
+      profileDir: generation,
+      readOnly: true,
+    })).toThrow(`complete Profile generation ${generation} has no package.json`)
+
+    mkdirSync(generation, { recursive: true })
+    writeProfileManifest(generation, {
+      name: 'generation',
+      dependencies: { plugin: '1.0.0' },
+      dsh: { profile: { bundles: [] } },
+    })
+    writeFileSync(join(generation, PROFILE_PATCH_FILENAME), ': invalid user layer')
+    const loaded = loadProfile('t', 'web', anchor, home, {
+      profileDir: generation,
+      readOnly: true,
+      userLayer: false,
+    })
+    expect(loaded).toMatchObject({ name: 'web', dir: generation, layers: [], patches: [] })
+    expect(existsSync(join(generation, 'pnpm-lock.yaml'))).toBe(false)
   })
 })
 

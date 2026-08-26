@@ -22,6 +22,7 @@ packages/    @deepseek-ai/dsh-<pkg> workspaces at packages/<group>/<pkg>/
   fs/          filesystem capability + policy
   lsp/         language-server capability
   skill/       skill provider registry + local impl + catalog/loader tool
+  mcp/         MCP clients/connections
   web/         web capability: Service Definition + search/fetch providers + tool Consumer
   compaction/     compaction capability + basic provider
   context/     request-context plugins
@@ -37,6 +38,8 @@ packages/    @deepseek-ai/dsh-<pkg> workspaces at packages/<group>/<pkg>/
   session/     durable session data: persistence, projection, titles, telemetry
   identity/    anonymous identity
   settings/    user-settings capability + file provider
+  profile/     Profile generations
+  continuation/ durable task continuation
   credentials/ credential/authorization capabilities + env/.env provider
   acp/         automation-only Agent Client Protocol server
   interaction/ approval/interaction capabilities, permission, commands, ask-user

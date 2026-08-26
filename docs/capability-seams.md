@@ -18,6 +18,15 @@ flowchart LR
   pkg_llm_replay["llm-replay"]
   pkg_agent_loop["agent-loop"]
   pkg_compaction_basic["compaction-basic"]
+  pkg_mcp_connections["mcp-connections"]
+  svc_mcpConnections["ctx.mcpConnections<br/>Managed MCP connection owner"]
+  pkg_mcp_connections_local["mcp-connections-local"]
+  pkg_profile_transactions["profile-transactions"]
+  svc_profileTransactions["ctx.profileTransactions<br/>Profile generation transactions"]
+  pkg_profile_transactions_local["profile-transactions-local"]
+  pkg_task_continuation["task-continuation"]
+  svc_taskContinuations["ctx.taskContinuations<br/>Durable task continuation"]
+  pkg_task_continuation_driver["task-continuation-driver"]
   pkg_token_meter["token-meter"]
   svc_tokenMeter["ctx.tokenMeter<br/>Replay token measurement"]
   pkg_compaction_tool_result_pruner["compaction-tool-result-pruner"]
@@ -245,10 +254,14 @@ flowchart LR
   pkg_llm_replay --> svc_llm
   pkg_lsp --> svc_lsp
   pkg_lsp_local --> svc_lsp
+  pkg_mcp_connections --> svc_mcpConnections
+  pkg_mcp_connections_local --> svc_mcpConnections
   pkg_message_feedback --> svc_messageFeedback
   pkg_modules --> svc_clientModules
   pkg_permission_presets --> svc_permissionPresets
   pkg_plan_mode --> svc_planMode
+  pkg_profile_transactions --> svc_profileTransactions
+  pkg_profile_transactions_local --> svc_profileTransactions
   pkg_pwsh_local --> svc_shell
   pkg_sandbox --> svc_sandbox
   pkg_sandbox_local --> svc_sandbox
@@ -291,6 +304,8 @@ flowchart LR
   pkg_subprocess_e2b --> svc_subprocess
   pkg_subprocess_local --> svc_subprocess
   pkg_system_prompt --> svc_systemPrompt
+  pkg_task_continuation --> svc_taskContinuations
+  pkg_task_continuation_driver --> svc_taskContinuations
   pkg_terminal --> svc_terminals
   pkg_terminal_bash --> svc_terminals
   pkg_token_meter --> svc_tokenMeter
@@ -427,6 +442,9 @@ flowchart LR
 | --- | --- | --- | --- | --- | --- | --- |
 | `ctx.attachments` | `seam` | [`attachment`](../packages/attachment/attachment) | [`attachment-local`](../packages/attachment/attachment-local) | `host-runtime`, [`llm-pi-ai`](../packages/llm/llm-pi-ai) | - | The host commits accepted images before session events; provider adapters resolve authorized durable references into provider-native content. |
 | `ctx.llm` | `seam` | [`llm`](../packages/llm/llm) | [`llm-deepseek`](../packages/llm/llm-deepseek), [`llm-pi-ai`](../packages/llm/llm-pi-ai), [`llm-replay`](../packages/test-support/llm-replay) | [`agent-loop`](../packages/core/agent-loop), [`compaction-basic`](../packages/compaction/compaction-basic) | - | Adapters register provider implementations; the loop and compaction call the provider-neutral stream service. |
+| `ctx.mcpConnections` | `seam` | [`mcp-connections`](../packages/mcp/mcp-connections) | [`mcp-connections-local`](../packages/mcp/mcp-connections-local) | - | - | The provider owns revisioned desired state, dynamic client fibers, qualified Tool generations, and durable recovery; out-of-tree management plugins consume the service. |
+| `ctx.profileTransactions` | `seam` | [`profile-transactions`](../packages/profile/profile-transactions) | [`profile-transactions-local`](../packages/profile/profile-transactions-local) | - | - | The provider stages and validates immutable generations, publishes revision-fenced state, records last-good boot acknowledgement, and restores through the same owner; the dsh CLI is the in-tree consumer. |
+| `ctx.taskContinuations` | `seam` | [`task-continuation`](../packages/continuation/task-continuation) | [`task-continuation-driver`](../packages/continuation/task-continuation-driver) | - | - | The driver persists verifier-gated claims and dispatches one bound Agent message at most once; out-of-tree workflow plugins reserve and verify claims. |
 | `ctx.tokenMeter` | `core` | [`token-meter`](../packages/llm/token-meter) | - | [`compaction-basic`](../packages/compaction/compaction-basic) | - | Owns isolated per-session replay folds; pressure consumers share immutable revisioned measurements. |
 | `ctx.toolResultPruner` | `core` | [`compaction-tool-result-pruner`](../packages/compaction/compaction-tool-result-pruner) | - | [`compaction-basic`](../packages/compaction/compaction-basic) | - | Rewrites oversized current tool results through replayable single-node surface replacements before summary compaction. |
 | `ctx.sessions` | `core` | [`session`](../packages/core/session) | - | [`agent-loop`](../packages/core/agent-loop), [`agent`](../packages/core/agent), [`session-persistence`](../packages/session/session-persistence), [`session-query`](../packages/session-query/session-query), [`session-query-sqlite`](../packages/session-query/session-query-sqlite), `subagent-inprocess`, [`invariants`](../packages/runtime-diagnostics/invariants), [`message-feedback`](../packages/feedback/message-feedback) | - | Owns append-only Session instances and emits the durable session event feed. |

@@ -85,6 +85,14 @@
     - id: credentials
       name: '@deepseek-ai/dsh-credentials-local'
 
+    # Runtime Extension Center mutations share the same journaled owner as the
+    # pre-Loader CLI resolver. Commits change only the next process's pointer.
+    - id: profile-transactions-local
+      name: '@deepseek-ai/dsh-profile-transactions-local'
+      config:
+        profilesDir: !!js dshHomePath('profiles')
+        installAnchor: !!js ctx.get('dshInstallAnchor')
+
     # The pi-ai multi-provider twin, mounted dormant: zero routes (and no extra
     # models in the picker) until a `llm-pi-ai:` settings section supplies provider
     # profiles — then those routes register live, keys resolving per request
@@ -99,6 +107,13 @@
       name: '@deepseek-ai/dsh-session-persistence-jsonl'
       config:
         root: !!js dshHomePath('sessions')
+
+    # Exact original-task continuation claims survive Host restarts. A claimant
+    # must still register a verifier before one queued turn can be admitted.
+    - id: task-continuation-driver
+      name: '@deepseek-ai/dsh-task-continuation-driver'
+      config:
+        root: !!js dshHomePath('task-continuations')
 
     # Durable image bytes live outside the append-only session log. Messages
     # keep content-addressed references that this shared backend resolves for
@@ -246,6 +261,12 @@
 
     - id: tool-skill
       name: '@deepseek-ai/dsh-tool-skill'
+
+    # Revision-fenced desired state for dynamically managed MCP connections.
+    # Enabled records reuse the ordinary MCP client and withdraw its tools on
+    # disable, update, removal, or provider disposal.
+    - id: mcp-connections-local
+      name: '@deepseek-ai/dsh-mcp-connections-local'
 
     - id: commands
       name: '@deepseek-ai/dsh-commands'

@@ -248,6 +248,10 @@ export async function runScenario(input: InputScript, opts: RunOptions): Promise
     await opts.prepareWorkspace?.(cwd)
     const env: NodeJS.ProcessEnv = {
       ...opts.env,
+      // Node 22 still classifies the product's built-in SQLite owner as experimental.
+      // Snapshot stderr remains reserved for product diagnostics across supported engines.
+      NODE_OPTIONS: [process.env.NODE_OPTIONS, opts.env?.NODE_OPTIONS, '--disable-warning=ExperimentalWarning']
+        .filter(Boolean).join(' '),
       DSH_SNAPSHOT: opts.mode,
       DSH_SNAPSHOT_FILE: opts.fixtureFile,
       DSH_SNAPSHOT_SESSIONS_ROOT: sessionsRoot,

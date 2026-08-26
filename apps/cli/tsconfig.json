@@ -57,6 +57,18 @@
       "path": "../../packages/util/home-paths"
     },
     {
+      "path": "../../packages/util/native-command"
+    },
+    {
+      "path": "../../packages/profile/profile-transactions"
+    },
+    {
+      "path": "../../packages/profile/profile-transactions-local"
+    },
+    {
+      "path": "../../packages/subprocess/subprocess"
+    },
+    {
       "path": "../../packages/mcp/mcp-client"
     },
     {

@@ -64,6 +64,19 @@ const windowsOnlyCoverageExclusions = process.platform !== 'win32'
     ]
   : []
 
+// These two files contain only platform ABI registration and argument
+// marshalling. All result, race, sentinel, and cleanup decisions live in the
+// unconditionally covered process-start-query module and run through injected
+// suites on every host. The matching platform lane exercises its real ABI.
+const nativeProcessAbiCoverageExclusions = [
+  ...(process.platform === 'darwin'
+    ? []
+    : ['packages/util/native-command/src/darwin-process-start.ts']),
+  ...(process.platform === 'win32'
+    ? []
+    : ['packages/util/native-command/src/windows-process-start.ts']),
+]
+
 // The confinement runner entry executes exclusively as a spawned child
 // process (the sandbox seam's argv-prefix wrapper): its module-level main()
 // would run the confinement in-process if imported, and vitest's v8 coverage
@@ -274,6 +287,7 @@ export default defineConfig({
         'packages/session/session-projection/src/index.ts',
         ...windowsUnsupportedCoveragePackages.map(path => `${path}/src/**/*.ts`),
         ...windowsOnlyCoverageExclusions,
+        ...nativeProcessAbiCoverageExclusions,
         ...windowsRunnerCoverageExclusions,
         ...pwshCoverageExclusions,
       ],

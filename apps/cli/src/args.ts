@@ -10,8 +10,8 @@
  * `dsh --profile tui --resume abc` boots the tui profile with `--resume abc`,
  * and `dsh --profile web -h` prints the web app's help, not this one's.
  *
- * `web` is a hardcoded alias for `--profile web`; `plugin` manages a profile's
- * plugin dependencies by forwarding to pnpm.
+ * `web` is a hardcoded alias for `--profile web`; `plugin` accepts the exact
+ * transaction commands owned by the Profile lifecycle service.
  * @module @deepseek-ai/dsh/args
  */
 
@@ -36,16 +36,26 @@ interface DumpConfigInvocation {
   patches: string[]
 }
 
-/** Manage a profile's plugins: forward `args` to pnpm inside the profile directory. */
+/** Manage a profile's plugins through exact Profile generation transactions. */
 interface PluginInvocation {
   mode: 'plugin'
   profile: string
-  /** Raw pnpm arguments, verbatim. */
+  /** Strict lifecycle operation and its exact artifact or content fences. */
   args: string[]
 }
 
-/** The resolved `dsh` invocation. Help, version, and errors exit inside {@link parseDshArgs}. */
-export type DshInvocation = ProfileInvocation | DumpConfigInvocation | PluginInvocation
+/** One resolved `dsh` invocation that the launcher must dispatch. */
+type DshInvocation = ProfileInvocation | DumpConfigInvocation | PluginInvocation
+
+/** Commander already rendered help, version, or an error; the launcher only owns its eventual status. */
+interface DshTerminalResult {
+  mode: 'terminal'
+  /** Exit status applied through `process.exitCode` after pending output drains. */
+  exitCode: number
+}
+
+/** Either one dispatchable invocation or a terminal Commander result with no invocation. */
+export type DshParseResult = DshInvocation | DshTerminalResult
 
 /** Launcher flags shared by the default command and the `web` alias. */
 interface BootOptions {
@@ -68,7 +78,9 @@ Examples:
   dsh --profile tui --patch ./extra.yml      boot a custom profile with one extra overlay
   dsh --profile tui --resume <session>       arguments after the launcher flags reach the app
   dsh --profile web --help                   the web app's own flags and help
-  dsh plugin --profile tui add <package>     install a plugin into the tui profile
+  dsh plugin --profile web list              inspect active, staged, and recovery generations
+  dsh plugin --profile web restore-receipt --mutation-id <id>  resolve one exact restore outcome
+  dsh plugin --profile web install ./p.tgz --package pkg --version 1.0.0 --digest sha256:<hex> --mutation-id <id>
 `
 
 /**
@@ -103,13 +115,13 @@ function resolveBoot(program: Command, profile: string, options: BootOptions, ar
 }
 
 /**
- * Resolve argv into one invocation, or print and exit for help, version, or an
- * error.
+ * Resolve argv into one invocation, or let Commander render help, version, or
+ * an error and return its terminal status without terminating the process.
  * @param argv - arguments after the Node binary and script.
  * @param version - version string printed by `--version`.
- * @returns the resolved invocation.
+ * @returns a dispatchable invocation or a terminal result whose output may still be draining.
  */
-export function parseDshArgs(argv: readonly string[], version: string): DshInvocation {
+export function parseDshArgs(argv: readonly string[], version: string): DshParseResult {
   let resolved: DshInvocation | undefined
   // Annotated, not inferred: the actions below call back into `program`, and an
   // inferred type would be circular through its own chain.
@@ -168,22 +180,23 @@ export function parseDshArgs(argv: readonly string[], version: string): DshInvoc
       resolved = resolveBoot(web, 'web', options, args)
     })
 
-  const plugin = program.command('plugin').description('manage a profile\'s plugins by forwarding the remaining arguments to pnpm in the profile directory')
+  const plugin = program.command('plugin').description('manage a profile through exact, validated generation transactions')
   plugin
     .requiredOption('--profile <name>', 'the profile whose plugins to manage (initialized on first use)')
     .allowUnknownOption()
-    .argument('[args...]', 'pnpm arguments, forwarded verbatim (add <pkg>, remove <pkg>, why <pkg>, ...)')
+    .argument('[args...]', 'writes require a reusable --mutation-id; list and restore-receipt are queries')
     .action((args: string[], options: { profile: string }) => {
       rejectParentOptions('plugin')
       if (options.profile === '') program.error('error: --profile needs a name')
-      if (args.length === 0) program.error('error: plugin needs pnpm arguments to forward (e.g. add <package>)')
+      if (args.length === 0) program.error('error: plugin needs install, update, uninstall, configure, restore, restore-receipt, or list')
       resolved = { mode: 'plugin', profile: options.profile, args }
     })
 
   try {
     program.parse(argv, { from: 'user' })
   } catch (error) {
-    return process.exit(error instanceof CommanderError ? error.exitCode : 1)
+    if (error instanceof CommanderError) return { mode: 'terminal', exitCode: error.exitCode }
+    throw error
   }
   /* v8 ignore next -- an action resolves or Commander throws */
   if (resolved === undefined) throw new Error('dsh: no invocation resolved')

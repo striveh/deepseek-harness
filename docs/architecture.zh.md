@@ -49,6 +49,9 @@ dsh --profile web --dump-config
 | [`core/agent-loop`](subsystems/core.zh.md) | 实现该接口的默认驱动器 | `ctx.agentLoop` |
 | [`core/scope`](subsystems/scope.zh.md) | 按 agent 划分作用域的注册原语 | 库，无 ctx 键 |
 | [`llm/llm`](subsystems/llm-streaming.zh.md) | 消息与流式词汇表，以及适配器 seam | `ctx.llm` |
+| [`mcp/mcp-connections`](subsystems/mcp-connections.zh.md) | 动态受管 MCP client 的 revision 化期望状态 | `ctx.mcpConnections` |
+| [`profile/profile-transactions`](subsystems/profile-transactions.zh.md) | 不可变 Profile generation staging、publication 与 last-good restore | `ctx.profileTransactions` |
+| [`continuation/task-continuation`](subsystems/task-continuation.zh.md) | 持久化 verifier 门控的原任务续跑 claim | `ctx.taskContinuations` |
 
 <a id="events"></a>
 

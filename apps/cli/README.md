@@ -11,9 +11,9 @@ The `dsh` command is the product launcher for profiles: ordered stacks of plugin
 | `dsh --profile <name>` | Boot the named profile under `$DSH_HOME/profiles/<name>`. |
 | `dsh --profile headless "job"` | Run one fresh persisted session, print the final answer, and exit. |
 | `dsh web` | Alias of `--profile web`. |
-| `dsh plugin --profile <name> <pnpm args>` | Manage a profile's plugins by forwarding to pnpm in the profile directory. |
+| `dsh plugin --profile <name> <operation>` | Run exact install, update, uninstall, configure, restore, or read-only list through Profile transactions. |
 
-The invoking directory is the default workspace root. The `web` and `headless` profiles auto-initialize on first use from shipped templates; any other profile must be created through `dsh plugin`.
+The invoking directory is the default workspace root. The `web` and `headless` profiles auto-initialize on first use from shipped templates. Profile mutations publish a complete generation for the next process and print `restart required`. On Node 22, the launcher filters only the exact SQLite `ExperimentalWarning`; all product diagnostics and unrelated runtime warnings remain visible on stderr.
 
 ## App arguments
 
@@ -31,12 +31,16 @@ dsh --help                          # the launcher's own help
 
 A profile directory holds a `package.json` (out-of-tree plugin dependencies plus the profile manifest `dsh.profile` with its ordered `bundles` list) and a `cordis.patch.yml` (the user's own patch layer).
 
-The tree composes over an empty root:
+Each invocation composes over its own launcher-owned empty root file. An unmanaged live Profile remains the relative-entry base. For an active managed generation, the launcher copies the digest-matching tree into the same invocation-private runtime root and gives only that copy to Loader; a later replacement of the authoritative generation's bytes cannot become imported plugin code. Boot failure or app disposal removes the private root and copy. Each root name binds its owner PID and exact process incarnation; later preparation removes roots whose owner exited or whose PID was reused while preserving live sibling invocations. Concurrent launches never share or write a Profile generation's `cordis.yml` path.
+
+The tree composes in this order:
 - each bundle's patch in `dsh.profile.bundles` order
 - then the profile's `cordis.patch.yml`, then the home-level `$DSH_HOME/cordis.patch.yml`
 - then `--patch` overlays
 
-Bundles named in `dsh.profile.bundles` resolve from the dsh installation first (`@deepseek-ai/dsh-base`, `@deepseek-ai/dsh-web-app`, `@deepseek-ai/dsh-headless`), then from the profile's own `node_modules`, where pnpm installs out-of-tree plugins.
+Bundles named in `dsh.profile.bundles` resolve from the dsh installation first (`@deepseek-ai/dsh-base`, `@deepseek-ai/dsh-web-app`, `@deepseek-ai/dsh-headless`), then from the effective live tree or invocation-private managed copy's real `node_modules` package files.
+
+`dsh plugin install` and `update` require one local `.tgz`, exact package name/version, and canonical SHA-256. `uninstall` names an installed package. `configure` transports a typed adapter's complete normalized `cordis.patch.yml` bytes with current/next digests. Every write also requires a caller-owned `--mutation-id`; reuse the exact id and command after an ambiguous completion, and never bind that id to different input. A revision or tree conflict proves that commit did not publish, so the CLI discards that unreferenced candidate and permits the same intent to stage again; any other commit failure retains the generation for exact replay. Arbitrary pnpm writes are rejected. Before the transaction owner reads its first snapshot, a first install atomically initializes or narrowly resumes the shipped Web template, then heals the installation-owned `profiles/node_modules` fallback using the same resolution authority as ordinary Profile boot. Every mutation builds a complete candidate, runs real Web Loader validation in a credential-minimized child, commits a pending-restart pointer, and becomes last-good only after the next real app boot succeeds. Validation executes admitted code with host filesystem and network authority; it is not a sandbox. Managed generation patches are not hot-reloaded; the home-level patch remains live.
 
 Use `--dump-default-config` and `--dump-config` to inspect the composed tree without booting it.
 

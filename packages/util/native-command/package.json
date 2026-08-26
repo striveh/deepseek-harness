@@ -1,6 +1,6 @@
 {
   "name": "@deepseek-ai/dsh-native-command",
-  "description": "Zero-dependency no-shell execFile runner for host-native OS integrations: utf8 stdio capture, abort propagation, Windows hide",
+  "description": "Host-native command execution and exact OS process-incarnation inspection",
   "version": "0.1.1-rc.2",
   "publishConfig": {
     "access": "public"
@@ -31,6 +31,9 @@
     "lib/types/**/*.d.ts"
   ],
   "license": "MIT",
+  "dependencies": {
+    "koffi": "^3.1.0"
+  },
   "peerDependencies": {
     "@deepseek-ai/dsh-invariants": "workspace:^",
     "@deepseek-ai/cordis": "workspace:^"

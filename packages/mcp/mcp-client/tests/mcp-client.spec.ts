@@ -1141,6 +1141,7 @@ describe('createTransport', () => {
       serverName: 'srv',
       url: 'http://localhost:3000/mcp',
       headers: {},
+      redirect: 'error',
       toolCallTimeoutMs: 60_000,
       failOnStartupError: false,
     }
@@ -1156,6 +1157,7 @@ describe('createTransport', () => {
       serverName: 'srv',
       url: 'http://localhost:3000/mcp',
       headers: { Authorization: 'Bearer token' },
+      redirect: 'manual',
       toolCallTimeoutMs: 60_000,
       failOnStartupError: false,
     }

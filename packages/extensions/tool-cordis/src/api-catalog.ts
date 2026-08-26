@@ -1053,6 +1053,78 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     ],
   },
   {
+    key: 'mcpConnections',
+    summary: 'Abstract owner of managed MCP connection desired state.',
+    description: 'Abstract owner of managed MCP connection desired state. Implementations persist revisions and reconcile enabled records with one live MCP client.',
+    methods: [
+      {
+        signature: 'abstract readonly protocolVersion: 1',
+        description: 'Exact runtime API revision paired with class identity by capability probes.',
+        parameters: [],
+      },
+      {
+        signature: 'abstract snapshot(): McpConnectionsSnapshot',
+        description: 'Return an immutable inventory snapshot.',
+        parameters: [],
+        returns: 'active and removed records at one global revision.',
+      },
+      {
+        signature: 'abstract get(id: McpConnectionId): McpConnectionView | undefined',
+        description: 'Return one active connection view.',
+        parameters: [{ name: 'id', description: 'connection to read.' }],
+        returns: 'its immutable view, or undefined when it is not active.',
+      },
+      {
+        signature: 'abstract getRemoved(id: McpConnectionId): RemovedMcpConnectionView | undefined',
+        description: 'Return one restorable removed record.',
+        parameters: [{ name: 'id', description: 'connection to read from the removed inventory.' }],
+        returns: 'its immutable removed view, or undefined when absent.',
+      },
+      {
+        signature: 'abstract configure(request: ConfigureMcpConnectionRequest): Promise<McpConnectionMutationReceipt>',
+        description: 'Persist a new desired record and reconcile its enabled state.',
+        parameters: [{ name: 'request', description: 'complete desired record, zero expected revision, and idempotency key.' }],
+        returns: 'the durable mutation receipt after runtime reconciliation settles.',
+      },
+      {
+        signature: 'abstract enable(request: McpConnectionMutationRequest): Promise<McpConnectionMutationReceipt>',
+        description: 'Enable one active desired record.',
+        parameters: [{ name: 'request', description: 'target, expected revision, and idempotency key.' }],
+        returns: 'the durable mutation receipt after activation settles.',
+      },
+      {
+        signature: 'abstract disable(request: McpConnectionMutationRequest): Promise<McpConnectionMutationReceipt>',
+        description: 'Disable one active desired record and wait for live tools to disappear.',
+        parameters: [{ name: 'request', description: 'target, expected revision, and idempotency key.' }],
+        returns: 'the durable mutation receipt after teardown reaches quiescence.',
+      },
+      {
+        signature: 'abstract update(request: UpdateMcpConnectionRequest): Promise<McpConnectionMutationReceipt>',
+        description: 'Replace one active record\'s resolved transport.',
+        parameters: [{ name: 'request', description: 'replacement transport, expected revision, and idempotency key.' }],
+        returns: 'the durable mutation receipt after enabled runtime replacement settles.',
+      },
+      {
+        signature: 'abstract remove(request: McpConnectionMutationRequest): Promise<McpConnectionMutationReceipt>',
+        description: 'Move one active record to the restorable removed inventory.',
+        parameters: [{ name: 'request', description: 'target, expected revision, and idempotency key.' }],
+        returns: 'the durable mutation receipt after teardown reaches quiescence.',
+      },
+      {
+        signature: 'abstract restore(request: RestoreMcpConnectionRequest): Promise<McpConnectionMutationReceipt>',
+        description: 'Restore one removed record and reconcile its prior enabled state.',
+        parameters: [{ name: 'request', description: 'removed target, expected tombstone revision, and idempotency key.' }],
+        returns: 'the durable mutation receipt after runtime reconciliation settles.',
+      },
+      {
+        signature: 'abstract purge(request: PurgeMcpConnectionRequest): Promise<McpConnectionMutationReceipt>',
+        description: 'Permanently delete one already removed desired record.',
+        parameters: [{ name: 'request', description: 'removed target, expected tombstone revision, and idempotency key.' }],
+        returns: 'the durable mutation receipt after the tombstone is absent.',
+      },
+    ],
+  },
+  {
     key: 'messageFeedback',
     summary: 'Storage-domain sidecar service.',
     description: 'Storage-domain sidecar service. It inspects persisted Session history and never creates or resumes an Agent or Session.',
@@ -1131,6 +1203,66 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
         description: 'Select whether plan mode should be active. Between turns the method appends the change immediately because no in-turn pre-step will run until another prompt starts a turn. The open-turn fold is the idle signal: agent status stays `running` through post-turn checkpointing, when no further in-turn pre-step runs. During an open turn the selection remains pending until the next accepted in-turn pre-step. Repeated selection of the current or already-pending state is a no-op.',
         parameters: [{ name: 'agent', description: 'The agent to switch.' }, { name: 'active', description: 'Whether plan mode should be active.' }],
         returns: 'what happened: `committed` (logged now), `queued` (awaiting the next accepted in-turn pre-step), `cancelled` (an opposite pending selection was cleared; the logged state already matches), or `noop` (already in that state).',
+      },
+    ],
+  },
+  {
+    key: 'profileTransactions',
+    summary: 'Transaction owner for complete named Profile generations.',
+    description: 'Transaction owner for complete named Profile generations.',
+    methods: [
+      {
+        signature: 'abstract readonly protocolVersion: 1',
+        description: 'Exact same-process API revision required by dynamic consumers.',
+        parameters: [],
+      },
+      {
+        signature: 'abstract snapshot(profile: ProfileId): Promise<ProfileSnapshot>',
+        description: 'Read the authoritative state and complete effective-tree digest without writing.',
+        parameters: [{ name: 'profile', description: 'Profile to inspect.' }],
+        returns: 'the state and effective directory app boot must consume.',
+      },
+      {
+        signature: 'abstract stage(request: StageProfileGenerationRequest): Promise<StagedProfileGeneration>',
+        description: 'Build a complete isolated candidate and run the Provider-owned real activation validator.',
+        parameters: [{ name: 'request', description: 'semantic mutation identity and fences for its first execution; a completed equivalent identity may carry newer fences.' }],
+        returns: 'the newly validated or durably replayed original generation handle.',
+      },
+      {
+        signature: 'abstract commit(request: CommitProfileGenerationRequest): Promise<ProfileCommitReceipt>',
+        description: 'Publish one validated generation; its activation requires process restart.',
+        parameters: [{ name: 'request', description: 'generation and current fences for first publication; a completed generation may carry newer fences.' }],
+        returns: 'the new or durably replayed original transition receipt.',
+      },
+      {
+        signature: 'abstract abort(request: AbortProfileGenerationRequest): Promise<boolean>',
+        description: 'Remove one generation that no authoritative state names.',
+        parameters: [{ name: 'request', description: 'exact Profile and generation to discard.' }],
+        returns: 'whether a generation directory was removed.',
+      },
+      {
+        signature: 'abstract restoreLastGood(request: RestoreLastGoodProfileRequest): Promise<ProfileCommitReceipt>',
+        description: 'Publish the appropriate last-good or rollback recovery generation.',
+        parameters: [{ name: 'request', description: 'Profile and both current conflict fences.' }],
+        returns: 'the durable transition receipt.',
+      },
+      {
+        signature: 'abstract getRestoreReceipt(request: GetProfileRestoreReceiptRequest): Promise<ProfileRestoreReceipt | null>',
+        description: 'Resolve a retained restore outcome, completing an already durable journal if process death interrupted receipt publication.',
+        parameters: [{ name: 'request', description: 'exact Profile and caller mutation identity to query.' }],
+        returns: 'the original committed receipt, or `null` when that identity has no restore transaction.',
+      },
+      {
+        signature: 'abstract acknowledgeBoot(request: AcknowledgeProfileBootRequest): Promise<ProfileCommitReceipt>',
+        description: 'Promote the active generation only after the real app Loader boot succeeds.',
+        parameters: [{ name: 'request', description: 'exact active generation and both current conflict fences.' }],
+        returns: 'the durable verification receipt.',
+      },
+      {
+        signature: 'abstract list(profile: ProfileId): Promise<ProfileGenerationInventory>',
+        description: 'List complete staged and recovery generations without changing disk state.',
+        parameters: [{ name: 'profile', description: 'Profile to inspect.' }],
+        returns: 'current snapshot plus staged and recoverable generations.',
       },
     ],
   },
@@ -1933,6 +2065,60 @@ export const SERVICE_API: readonly ServiceApiEntry[] = [
     ],
   },
   {
+    key: 'taskContinuations',
+    summary: 'Service API for durable, verifier-gated continuation claims.',
+    description: 'Service API for durable, verifier-gated continuation claims.',
+    methods: [
+      {
+        signature: 'abstract readonly protocolVersion: 1',
+        description: 'Exact same-process API revision required by dynamic consumers.',
+        parameters: [],
+      },
+      {
+        signature: 'abstract create(agent: Agent, request: CreateTaskContinuationRequest): Promise<TaskContinuationClaim>',
+        description: 'Park one continuation for an exact live Agent without waking a turn.',
+        parameters: [{ name: 'agent', description: 'exact live Agent whose session owns the task.' }, { name: 'request', description: 'task, need, verifier, payload-digest, and expiry fences.' }],
+        returns: 'the durably created pending claim.',
+      },
+      {
+        signature: 'abstract reserve(request: ReserveTaskContinuationRequest): Promise<TaskContinuationClaim>',
+        description: 'Idempotently create or recover one caller-owned reservation without requiring a live Agent object.',
+        parameters: [{ name: 'request', description: 'caller key, Session/task fences, verifier payload, expiry, and restricted resume route.' }],
+        returns: 'the one durable claim bound to the caller key.',
+      },
+      {
+        signature: 'abstract get(id: ContinuationId): Promise<TaskContinuationClaim | undefined>',
+        description: 'Read one claim by stable identity.',
+        parameters: [{ name: 'id', description: 'continuation identity to read.' }],
+        returns: 'the immutable durable view, or `undefined` when absent.',
+      },
+      {
+        signature: 'abstract list(request?: ListTaskContinuationsRequest): Promise<readonly TaskContinuationClaim[]>',
+        description: 'List claims, optionally restricted to one exact session.',
+        parameters: [{ name: 'request', description: 'optional management filter.' }],
+        returns: 'immutable views in deterministic creation order.',
+      },
+      {
+        signature: 'abstract cancel(ref: TaskContinuationRef): Promise<boolean>',
+        description: 'Make one exact pending or ready claim permanently canceled.',
+        parameters: [{ name: 'ref', description: 'continuation, session, and task-revision fence.' }],
+        returns: 'whether this call won before the claim reached consumed dispatch intent.',
+      },
+      {
+        signature: 'abstract supersede(request: SupersedeTaskContinuationRequest): Promise<boolean>',
+        description: 'Make one exact pending or ready claim terminal in favor of a newer task revision.',
+        parameters: [{ name: 'request', description: 'old exact fence and replacement revision.' }],
+        returns: 'whether this call won before the claim reached consumed dispatch intent.',
+      },
+      {
+        signature: 'registerVerifier(verifier: TaskContinuationVerifier): () => void',
+        description: 'Register an extension-owned verifier under an effect-scoped identity.',
+        parameters: [{ name: 'verifier', description: 'non-mutating evidence verifier.' }],
+        returns: 'the exact single-use registration disposer.',
+      },
+    ],
+  },
+  {
     key: 'terminals',
     summary: 'In-process registry for replaceable PTY backends and exact-Agent sessions.',
     description: 'In-process registry for replaceable PTY backends and exact-Agent sessions.',
@@ -2622,6 +2808,14 @@ export const EVENT_API: readonly EventApiEntry[] = [
     parameters: [{ name: 'options', description: 'the full request. A LOOP-built request carries the process-local {@link markAgentLoopRequest} identity and arrives deep-frozen (mutation throws): its content is a pure function of the session log (the reconstructability Agent Note), so listeners read it, never rewrite it. Hand-built calls do not carry that marker; their messages already obey the immutable creation contract.' }],
   },
   {
+    name: 'mcp-connections/change',
+    mode: 'emit',
+    signature: '\'mcp-connections/change\'(change: McpConnectionChange): void',
+    summary: 'Announces committed MCP desired state or a published Host/tool observation.',
+    description: 'Announces committed MCP desired state or a published Host/tool observation. The active view is already queryable through `ctx.mcpConnections` when present; removal is already absent from the active inventory, and purge is absent from both active and removed inventories.',
+    parameters: [{ name: 'change', description: 'committed change and its post-commit active view.' }],
+  },
+  {
     name: 'session-telemetry/record',
     mode: 'waterfall',
     signature: '\'session-telemetry/record\'(record: SessionTelemetryRecord, next: () => SessionTelemetryRecord): SessionTelemetryRecord',
@@ -2841,6 +3035,14 @@ export const EVENT_API: readonly EventApiEntry[] = [
 
 /** Shapes of every exported type the Service and Event signatures reference (transitively), sorted by name. */
 export const TYPE_API: readonly TypeApiEntry[] = [
+  {
+    name: 'AbortProfileGenerationRequest',
+    declaration: 'export interface AbortProfileGenerationRequest {\n    readonly profile: ProfileId;\n    readonly generation: ProfileGenerationId;\n}',
+  },
+  {
+    name: 'AcknowledgeProfileBootRequest',
+    declaration: 'export interface AcknowledgeProfileBootRequest {\n    readonly profile: ProfileId;\n    readonly expectedRevision: number;\n    readonly expectedTreeDigest: ProfileTreeDigest;\n    readonly generation: ProfileGenerationId;\n}',
+  },
   {
     name: 'AdapterRegistrationHandle',
     declaration: 'export interface AdapterRegistrationHandle {\n    (): void;\n    replace(providers: string[]): void;\n}',
@@ -3090,6 +3292,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type CommandResult = {\n    readonly kind: \'success\';\n    readonly text?: string;\n    readonly sourceEventSeq?: number;\n} | {\n    readonly kind: \'error\';\n    readonly text: string;\n};',
   },
   {
+    name: 'CommitProfileGenerationRequest',
+    declaration: 'export interface CommitProfileGenerationRequest {\n    readonly profile: ProfileId;\n    readonly expectedRevision: number;\n    readonly expectedTreeDigest: ProfileTreeDigest;\n    readonly generation: ProfileGenerationId;\n}',
+  },
+  {
     name: 'CompactionAgentContext',
     declaration: 'export interface CompactionAgentContext {\n    session: Session;\n    options: {\n        provider?: string;\n        model?: string;\n    };\n}',
   },
@@ -3104,6 +3310,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'CompactionTrigger',
     declaration: 'export type CompactionTrigger = \'pressure\' | \'context-overflow\';',
+  },
+  {
+    name: 'ConfigureMcpConnectionRequest',
+    declaration: 'export interface ConfigureMcpConnectionRequest {\n    readonly desired: McpConnectionDesired;\n    readonly mutationId: McpConnectionMutationId;\n    readonly expectedRevision: 0;\n}',
   },
   {
     name: 'ConfinedArgv',
@@ -3154,6 +3364,22 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface ContinuableSubagentDescriptorData extends SubagentDescriptorBase {\n    readonly mode: \'continuable\';\n    readonly label: string;\n    readonly agentProvider?: string;\n    readonly agentModel?: string;\n    readonly persona?: string;\n    readonly toolFilter?: ToolRestriction;\n}',
   },
   {
+    name: 'ContinuationCallerId',
+    declaration: 'export type ContinuationCallerId = Branded<\'ContinuationCallerId\'>;',
+  },
+  {
+    name: 'ContinuationDigest',
+    declaration: 'export type ContinuationDigest = Branded<\'ContinuationDigest\'>;',
+  },
+  {
+    name: 'ContinuationId',
+    declaration: 'export type ContinuationId = Branded<\'ContinuationId\'>;',
+  },
+  {
+    name: 'ContinuationMutationId',
+    declaration: 'export type ContinuationMutationId = Branded<\'ContinuationMutationId\'>;',
+  },
+  {
     name: 'CordisDynamicPackageId',
     declaration: 'export type CordisDynamicPackageId = Branded<\'CordisDynamicPackageId\'>;',
   },
@@ -3196,6 +3422,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'CreateSessionOptions',
     declaration: 'export interface CreateSessionOptions {\n    readonly seed?: readonly SessionEvent[];\n    readonly meta?: {\n        readonly cwd?: string;\n        readonly parentSession?: SessionId;\n        readonly createdAt?: number;\n        readonly seedLength?: number;\n        readonly origin?: \'subagent\';\n        readonly delegationDepth?: number;\n        readonly agentPreset?: string;\n    };\n}',
+  },
+  {
+    name: 'CreateTaskContinuationRequest',
+    declaration: 'export interface CreateTaskContinuationRequest {\n    readonly callerId: ContinuationCallerId;\n    readonly mutationId: ContinuationMutationId;\n    readonly sessionId: SessionId;\n    readonly originalMessageId: MessageId;\n    readonly needDigest: ContinuationDigest;\n    readonly taskRevision: TaskContinuationRevision;\n    readonly verifierId: TaskContinuationVerifierId;\n    readonly verificationPayloadDigest: ContinuationDigest;\n    readonly expiresAtMs: number;\n}',
   },
   {
     name: 'CreateTeamTaskRequest',
@@ -3338,6 +3568,22 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface EpochHeader {\n    config: LlmCallConfig;\n    adapterDefaults?: LlmCallConfigAdapterDefaults;\n    system?: string;\n    tools?: ToolSchema[];\n}',
   },
   {
+    name: 'ExactProfileArtifactMutation',
+    declaration: 'export interface ExactProfileArtifactMutation {\n    readonly operation: \'install\' | \'update\';\n    readonly kind: \'package\' | \'bundle\';\n    readonly packageName: string;\n    readonly version: string;\n    readonly artifact: {\n        readonly path: string;\n        readonly digest: ProfileArtifactDigest;\n    };\n}',
+  },
+  {
+    name: 'ExactProfileConfigureMutation',
+    declaration: 'export interface ExactProfileConfigureMutation {\n    readonly operation: \'configure\';\n    readonly packageName: string;\n    readonly patch: {\n        readonly expectedDigest: ProfileContentDigest;\n        readonly nextUtf8: string;\n        readonly nextDigest: ProfileContentDigest;\n    };\n}',
+  },
+  {
+    name: 'ExactProfileMutation',
+    declaration: 'export type ExactProfileMutation = ExactProfileArtifactMutation | ExactProfileUninstallMutation | ExactProfileConfigureMutation;',
+  },
+  {
+    name: 'ExactProfileUninstallMutation',
+    declaration: 'export interface ExactProfileUninstallMutation {\n    readonly operation: \'uninstall\';\n    readonly packageName: string;\n}',
+  },
+  {
     name: 'FileDiff',
     declaration: 'export interface FileDiff {\n    path: string;\n    oldText: string | null;\n    newText: string;\n}',
   },
@@ -3412,6 +3658,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'GenericResultView',
     declaration: 'export interface GenericResultView {\n    card: \'generic\';\n    title?: string;\n    content?: ContentBlock[];\n}',
+  },
+  {
+    name: 'GetProfileRestoreReceiptRequest',
+    declaration: 'export interface GetProfileRestoreReceiptRequest {\n    readonly profile: ProfileId;\n    readonly mutationId: ProfileMutationId;\n}',
   },
   {
     name: 'GoalActivation',
@@ -3594,6 +3844,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface KvUnitDescriptor {\n    readonly name: string;\n    readonly version: number;\n    readonly tables: readonly string[];\n    readonly hasGlobal: boolean;\n}',
   },
   {
+    name: 'ListTaskContinuationsRequest',
+    declaration: 'export interface ListTaskContinuationsRequest {\n    readonly sessionId?: SessionId;\n    readonly callerId?: ContinuationCallerId;\n    readonly mutationId?: ContinuationMutationId;\n}',
+  },
+  {
     name: 'LlmAdapter',
     declaration: 'export abstract class LlmAdapter {\n    providerInfo(provider: string): LlmProviderInfo;\n    providerRetryPolicy(_provider: string): ResolvedRetryPolicy | undefined;\n    listModels(_provider: string): Promise<readonly LlmModelInfo[]>;\n    resolveModel(provider: string, model: string, _signal?: AbortSignal): Promise<LlmResolvedModelInfo>;\n    async prepareCall(provider: string, model: string, signal?: AbortSignal): Promise<PreparedAdapterCall>;\n    abstract stream(options: GenerateOptions): AsyncIterable<StreamChunk>;\n}',
   },
@@ -3692,6 +3946,66 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'ManualCompactAgentContext',
     declaration: 'export interface ManualCompactAgentContext extends CompactionAgentContext {\n    runMaintenance<T>(task: (signal: AbortSignal) => Promise<T>): Promise<T>;\n}',
+  },
+  {
+    name: 'McpConnectionChange',
+    declaration: 'export interface McpConnectionChange {\n    readonly kind: \'desired\' | \'removed\' | \'purged\' | \'observed\' | \'tools\';\n    readonly id: McpConnectionId;\n    readonly view?: McpConnectionView;\n}',
+  },
+  {
+    name: 'McpConnectionDesired',
+    declaration: 'export interface McpConnectionDesired {\n    readonly id: McpConnectionId;\n    readonly enabled: boolean;\n    readonly transport: McpTransportDescriptor;\n}',
+  },
+  {
+    name: 'McpConnectionId',
+    declaration: 'export type McpConnectionId = Branded<\'McpConnectionId\'>;',
+  },
+  {
+    name: 'McpConnectionMutationId',
+    declaration: 'export type McpConnectionMutationId = Branded<\'McpConnectionMutationId\'>;',
+  },
+  {
+    name: 'McpConnectionMutationReceipt',
+    declaration: 'export interface McpConnectionMutationReceipt {\n    readonly mutationId: McpConnectionMutationId;\n    readonly operation: McpConnectionOperation;\n    readonly id: McpConnectionId;\n    readonly previousRevision?: number;\n    readonly revision: number;\n    readonly snapshotRevision: number;\n    readonly changed: boolean;\n    readonly desiredDigest: string | null;\n}',
+  },
+  {
+    name: 'McpConnectionMutationRequest',
+    declaration: 'export interface McpConnectionMutationRequest {\n    readonly id: McpConnectionId;\n    readonly mutationId: McpConnectionMutationId;\n    readonly expectedRevision: number;\n}',
+  },
+  {
+    name: 'McpConnectionObserved',
+    declaration: 'export interface McpConnectionObserved {\n    readonly state: \'disabled\' | \'connecting\' | \'ready\' | \'stopping\' | \'error\';\n    readonly desiredRevision: number;\n    readonly generation: number;\n    readonly message?: string;\n}',
+  },
+  {
+    name: 'McpConnectionOperation',
+    declaration: 'export type McpConnectionOperation = \'configure\' | \'enable\' | \'disable\' | \'update\' | \'remove\' | \'restore\' | \'purge\';',
+  },
+  {
+    name: 'McpConnectionsSnapshot',
+    declaration: 'export interface McpConnectionsSnapshot {\n    readonly revision: number;\n    readonly connections: readonly McpConnectionView[];\n    readonly removed: readonly RemovedMcpConnectionView[];\n}',
+  },
+  {
+    name: 'McpConnectionView',
+    declaration: 'export interface McpConnectionView {\n    readonly id: McpConnectionId;\n    readonly revision: number;\n    readonly desired: McpConnectionDesired;\n    readonly observed: McpConnectionObserved;\n    readonly tools: McpToolGeneration;\n}',
+  },
+  {
+    name: 'McpReconnectPolicy',
+    declaration: 'export interface McpReconnectPolicy {\n    readonly enabled: boolean;\n    readonly initialDelayMs: number;\n    readonly maxDelayMs: number;\n    readonly maxAttempts: number;\n}',
+  },
+  {
+    name: 'McpStdioTransportDescriptor',
+    declaration: 'export interface McpStdioTransportDescriptor {\n    readonly transport: \'stdio\';\n    readonly command: string;\n    readonly args: readonly string[];\n    readonly env: Readonly<Record<string, string>>;\n    readonly cwd: string;\n    readonly toolCallTimeoutMs: number;\n    readonly reconnect: McpReconnectPolicy;\n}',
+  },
+  {
+    name: 'McpStreamableHttpTransportDescriptor',
+    declaration: 'export interface McpStreamableHttpTransportDescriptor {\n    readonly transport: \'streamable-http\';\n    readonly url: string;\n    readonly headers: Readonly<Record<string, string>>;\n    readonly redirect: \'error\' | \'follow\' | \'manual\';\n    readonly toolCallTimeoutMs: number;\n    readonly reconnect: McpReconnectPolicy;\n}',
+  },
+  {
+    name: 'McpToolGeneration',
+    declaration: 'export interface McpToolGeneration {\n    readonly generation: number;\n    readonly digest: string;\n    readonly names: readonly string[];\n}',
+  },
+  {
+    name: 'McpTransportDescriptor',
+    declaration: 'export type McpTransportDescriptor = McpStdioTransportDescriptor | McpStreamableHttpTransportDescriptor;',
   },
   {
     name: 'Message',
@@ -3850,6 +4164,54 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export type PreToolDecision = {\n    kind: \'allow\';\n} | {\n    kind: \'deny\';\n    reason: string;\n} | {\n    kind: \'ask\';\n    reason?: string;\n};',
   },
   {
+    name: 'ProfileArtifactDigest',
+    declaration: 'export type ProfileArtifactDigest = Branded<\'ProfileArtifactDigest\'>;',
+  },
+  {
+    name: 'ProfileBootStatus',
+    declaration: 'export type ProfileBootStatus = \'live\' | \'pending-restart\' | \'verified\';',
+  },
+  {
+    name: 'ProfileCommitReceipt',
+    declaration: 'export interface ProfileCommitReceipt {\n    readonly operation: \'commit\' | \'restore\' | \'acknowledge-boot\';\n    readonly before: ProfileSnapshot;\n    readonly after: ProfileSnapshot;\n    readonly restartRequired: boolean;\n}',
+  },
+  {
+    name: 'ProfileContentDigest',
+    declaration: 'export type ProfileContentDigest = Branded<\'ProfileContentDigest\'>;',
+  },
+  {
+    name: 'ProfileGenerationId',
+    declaration: 'export type ProfileGenerationId = Branded<\'ProfileGenerationId\'>;',
+  },
+  {
+    name: 'ProfileGenerationInventory',
+    declaration: 'export interface ProfileGenerationInventory {\n    readonly snapshot: ProfileSnapshot;\n    readonly active: ProfileGenerationSummary | null;\n    readonly staged: readonly ProfileGenerationSummary[];\n    readonly recoverable: readonly ProfileGenerationSummary[];\n}',
+  },
+  {
+    name: 'ProfileGenerationSummary',
+    declaration: 'export interface ProfileGenerationSummary {\n    readonly generation: ProfileGenerationId;\n    readonly treeDigest: ProfileTreeDigest;\n    readonly mutationId: ProfileMutationId | null;\n    readonly mutation: ExactProfileMutation | null;\n}',
+  },
+  {
+    name: 'ProfileId',
+    declaration: 'export type ProfileId = Branded<\'ProfileId\'>;',
+  },
+  {
+    name: 'ProfileMutationId',
+    declaration: 'export type ProfileMutationId = Branded<\'ProfileMutationId\'>;',
+  },
+  {
+    name: 'ProfileRestoreReceipt',
+    declaration: 'export interface ProfileRestoreReceipt {\n    readonly mutationId: ProfileMutationId;\n    readonly status: \'committed\';\n    readonly operation: \'restore\';\n    readonly before: ProfileSnapshot;\n    readonly after: ProfileSnapshot;\n    readonly restartRequired: true;\n}',
+  },
+  {
+    name: 'ProfileSnapshot',
+    declaration: 'export interface ProfileSnapshot {\n    readonly profile: ProfileId;\n    readonly revision: number;\n    readonly treeDigest: ProfileTreeDigest;\n    readonly effectivePath: string;\n    readonly activeGeneration: ProfileGenerationId | null;\n    readonly lastGoodGeneration: ProfileGenerationId | null;\n    readonly rollbackGeneration: ProfileGenerationId | null;\n    readonly bootStatus: ProfileBootStatus;\n}',
+  },
+  {
+    name: 'ProfileTreeDigest',
+    declaration: 'export type ProfileTreeDigest = Branded<\'ProfileTreeDigest\'>;',
+  },
+  {
     name: 'ProjectionChangeListener',
     declaration: 'export type ProjectionChangeListener = (session: Session, key: Extract<keyof SessionProjectionMap, string>, value: unknown, seq: number) => void;',
   },
@@ -3894,6 +4256,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface PruneResult {\n    readonly pruned: readonly PrunedEntry[];\n    readonly charsRemoved: number;\n}',
   },
   {
+    name: 'PurgeMcpConnectionRequest',
+    declaration: 'export type PurgeMcpConnectionRequest = McpConnectionMutationRequest;',
+  },
+  {
     name: 'ReadFileLine',
     declaration: 'export interface ReadFileLine {\n    number: number;\n    text: string;\n}',
   },
@@ -3912,6 +4278,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'RedactedSecret',
     declaration: 'export interface RedactedSecret {\n    path: string[];\n    set: boolean;\n}',
+  },
+  {
+    name: 'RemovedMcpConnectionView',
+    declaration: 'export interface RemovedMcpConnectionView {\n    readonly id: McpConnectionId;\n    readonly revision: number;\n    readonly desired: McpConnectionDesired;\n    readonly removedAtRevision: number;\n}',
   },
   {
     name: 'ReplayEnvelope',
@@ -3936,6 +4306,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'RequestRunOutcome',
     declaration: 'export type RequestRunOutcome = \'approved\' | \'completed\' | \'rejected\' | \'cancelled\' | \'failed\';',
+  },
+  {
+    name: 'ReserveTaskContinuationRequest',
+    declaration: 'export interface ReserveTaskContinuationRequest extends CreateTaskContinuationRequest {\n    readonly resumeAgentOptions: Readonly<AgentOptions>;\n}',
   },
   {
     name: 'ResolvedAlwaysRetryPolicy',
@@ -3964,6 +4338,14 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'RestoredSessionOptions',
     declaration: 'export interface RestoredSessionOptions {\n    readonly seed: SessionEvent[];\n    readonly meta: SessionHeader;\n    readonly seedSource: \'persistence\';\n}',
+  },
+  {
+    name: 'RestoreLastGoodProfileRequest',
+    declaration: 'export interface RestoreLastGoodProfileRequest {\n    readonly profile: ProfileId;\n    readonly mutationId: ProfileMutationId;\n    readonly expectedRevision: number;\n    readonly expectedTreeDigest: ProfileTreeDigest;\n}',
+  },
+  {
+    name: 'RestoreMcpConnectionRequest',
+    declaration: 'export type RestoreMcpConnectionRequest = McpConnectionMutationRequest;',
   },
   {
     name: 'ResumeAgentOptions',
@@ -4446,6 +4828,14 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface SpillSource {\n    toolName: string;\n    callId: CallId;\n    label: string;\n}',
   },
   {
+    name: 'StagedProfileGeneration',
+    declaration: 'export interface StagedProfileGeneration {\n    readonly profile: ProfileId;\n    readonly mutationId: ProfileMutationId;\n    readonly generation: ProfileGenerationId;\n    readonly basedOnRevision: number;\n    readonly basedOnTreeDigest: ProfileTreeDigest;\n    readonly treeDigest: ProfileTreeDigest;\n    readonly mutation: ExactProfileMutation;\n}',
+  },
+  {
+    name: 'StageProfileGenerationRequest',
+    declaration: 'export interface StageProfileGenerationRequest {\n    readonly profile: ProfileId;\n    readonly mutationId: ProfileMutationId;\n    readonly expectedRevision: number;\n    readonly expectedTreeDigest: ProfileTreeDigest;\n    readonly mutation: ExactProfileMutation;\n}',
+  },
+  {
     name: 'StorageBackend',
     declaration: 'export interface StorageBackend {\n    readonly kv?: KvFacet;\n    close(): Promise<void>;\n}',
   },
@@ -4586,6 +4976,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
     declaration: 'export interface SubprocessTerminalSpawnSpec {\n    argv: readonly string[];\n    cwd: string;\n    env?: Record<string, string> | undefined;\n    rows: number;\n    cols: number;\n    graceMs: number;\n    signal?: AbortSignal | undefined;\n}',
   },
   {
+    name: 'SupersedeTaskContinuationRequest',
+    declaration: 'export interface SupersedeTaskContinuationRequest extends TaskContinuationRef {\n    readonly replacementTaskRevision: TaskContinuationRevision;\n}',
+  },
+  {
     name: 'SurfaceEvent',
     declaration: 'export type SurfaceEvent = SessionEvent<SurfaceEventType> & {\n    surfaceOp: SurfaceOp;\n};',
   },
@@ -4608,6 +5002,46 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'TableValueOf',
     declaration: 'export type TableValueOf<S extends DomainSpec, N extends keyof S[\'tables\']> = S[\'tables\'][N] extends DomainTableSpec<string, infer V> ? V : never;',
+  },
+  {
+    name: 'TaskContinuationClaim',
+    declaration: 'export interface TaskContinuationClaim extends TaskContinuationMessageSource {\n    readonly callerId: ContinuationCallerId;\n    readonly mutationId: ContinuationMutationId;\n    readonly recordRevision: number;\n    readonly dispatchMessageId: MessageId;\n    readonly resumeAgentOptions: Readonly<AgentOptions>;\n    readonly state: TaskContinuationState;\n    readonly createdAtMs: number;\n    readonly updatedAtMs: number;\n    readonly supersededByTaskRevision?: TaskContinuationRevision;\n}',
+  },
+  {
+    name: 'TaskContinuationMessageSource',
+    declaration: 'export interface TaskContinuationMessageSource {\n    readonly kind: \'task-continuation\';\n    readonly version: 1;\n    readonly continuationId: ContinuationId;\n    readonly sessionId: SessionId;\n    readonly originalMessageId: MessageId;\n    readonly needDigest: ContinuationDigest;\n    readonly taskRevision: TaskContinuationRevision;\n    readonly verifierId: TaskContinuationVerifierId;\n    readonly verificationPayloadDigest: ContinuationDigest;\n    readonly expiresAtMs: number;\n}',
+  },
+  {
+    name: 'TaskContinuationNotReady',
+    declaration: 'export interface TaskContinuationNotReady {\n    readonly kind: \'not-ready\';\n}',
+  },
+  {
+    name: 'TaskContinuationReady',
+    declaration: 'export interface TaskContinuationReady {\n    readonly kind: \'ready\';\n    readonly continuationId: ContinuationId;\n    readonly sessionId: SessionId;\n    readonly originalMessageId: MessageId;\n    readonly needDigest: ContinuationDigest;\n    readonly taskRevision: TaskContinuationRevision;\n    readonly verificationPayloadDigest: ContinuationDigest;\n}',
+  },
+  {
+    name: 'TaskContinuationRef',
+    declaration: 'export interface TaskContinuationRef {\n    readonly id: ContinuationId;\n    readonly sessionId: SessionId;\n    readonly taskRevision: TaskContinuationRevision;\n}',
+  },
+  {
+    name: 'TaskContinuationRevision',
+    declaration: 'export type TaskContinuationRevision = Branded<\'TaskContinuationRevision\'>;',
+  },
+  {
+    name: 'TaskContinuationState',
+    declaration: 'export type TaskContinuationState = \'pending\' | \'ready\' | \'consumed\' | \'claimed\' | \'canceled\' | \'superseded\' | \'expired\' | \'invalid\';',
+  },
+  {
+    name: 'TaskContinuationVerification',
+    declaration: 'export type TaskContinuationVerification = TaskContinuationNotReady | TaskContinuationReady;',
+  },
+  {
+    name: 'TaskContinuationVerifier',
+    declaration: 'export interface TaskContinuationVerifier {\n    readonly id: TaskContinuationVerifierId;\n    verify(claim: TaskContinuationClaim, signal: AbortSignal): Promise<TaskContinuationVerification>;\n}',
+  },
+  {
+    name: 'TaskContinuationVerifierId',
+    declaration: 'export type TaskContinuationVerifierId = Branded<\'TaskContinuationVerifierId\'>;',
   },
   {
     name: 'TeamId',
@@ -4924,6 +5358,10 @@ export const TYPE_API: readonly TypeApiEntry[] = [
   {
     name: 'TypertTypeModel',
     declaration: 'export interface TypertTypeModel {\n    readonly name: string;\n    readonly declaration: string;\n}',
+  },
+  {
+    name: 'UpdateMcpConnectionRequest',
+    declaration: 'export interface UpdateMcpConnectionRequest extends McpConnectionMutationRequest {\n    readonly transport: McpTransportDescriptor;\n}',
   },
   {
     name: 'UpdateTeamTaskRequest',

@@ -7,3 +7,5 @@ Packages bridging the harness to the MCP ecosystem.
 | Package | Role |
 |---|---|
 | [`mcp-client/`](mcp-client/README.md) | MCP client bridge that registers external server tools on `ctx.tools` |
+| [`mcp-connections/`](mcp-connections/README.md) | Revisioned Service Definition for managed connection desired state and runtime evidence |
+| [`mcp-connections-local/`](mcp-connections-local/README.md) | Durable local provider that owns dynamic `mcp-client` fibers and quiescent lifecycle mutations |

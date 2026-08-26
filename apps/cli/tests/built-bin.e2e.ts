@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto'
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -13,19 +14,22 @@ const repoRoot = fileURLToPath(new URL('../../../', import.meta.url))
 const cliVersion = (JSON.parse(readFileSync(new URL('../package.json', import.meta.url), 'utf8')) as { version: string }).version
 const dshBin = join(repoRoot, 'apps/cli/lib/bin.js')
 const invalidProvider = fileURLToPath(new URL('./fixtures/invalid-provider.cordis.yml', import.meta.url))
+const delayedStdoutRegister = fileURLToPath(new URL('./fixtures/delayed-stdout-register.mjs', import.meta.url))
+const delayedStderrRegister = fileURLToPath(new URL('./fixtures/delayed-stderr-register.mjs', import.meta.url))
 
 async function runBuiltBin(
   args: readonly string[] = [],
   env: Readonly<Record<string, string | undefined>> = {},
   cwd?: string,
+  nodeArgs: readonly string[] = [],
 ): Promise<{ stdout: string; code: number; stderr: string }> {
   const childEnv = Object.fromEntries(
     Object.entries({ ...process.env, ...env })
       .filter((entry): entry is [string, string] => entry[1] !== undefined),
   )
-  const result = await execa(process.execPath, [dshBin, ...args], {
+  const result = await execa(process.execPath, [...nodeArgs, dshBin, ...args], {
     input: '',
-    timeout: 25_000,
+    timeout: 40_000,
     killSignal: 'SIGKILL',
     reject: false,
     env: childEnv,
@@ -33,7 +37,7 @@ async function runBuiltBin(
     ...cwd === undefined ? {} : { cwd },
   })
   if (result.timedOut) {
-    throw new Error(`dsh built bin did not exit within 25s. stdout:\n${result.stdout}\nstderr:\n${result.stderr}`)
+    throw new Error(`dsh built bin did not exit within 40s. stdout:\n${result.stdout}\nstderr:\n${result.stderr}`)
   }
   return { stdout: result.stdout, code: result.exitCode ?? -1, stderr: result.stderr }
 }
@@ -43,6 +47,65 @@ async function waitForFile(file: string): Promise<void> {
   while (!existsSync(file)) {
     if (Date.now() >= deadline) throw new Error(`dsh profile lifecycle marker did not appear: ${file}`)
     await new Promise(resolve => setTimeout(resolve, 20))
+  }
+}
+
+async function waitForProfileBootStatus(home: string, status: string): Promise<string> {
+  const deadline = Date.now() + 20_000
+  let diagnostic = ''
+  while (Date.now() < deadline) {
+    const result = await runBuiltBin(['plugin', '--profile', 'web', 'list'], { DSH_HOME: home })
+    diagnostic = `${result.stdout}\n${result.stderr}`
+    if (result.code === 0 && result.stdout.includes(`"bootStatus": "${status}"`)) return result.stdout
+    await new Promise(resolve => setTimeout(resolve, 20))
+  }
+  throw new Error(`dsh Profile did not reach boot status ${status}:\n${diagnostic}`)
+}
+
+async function createExactBundleArtifact(root: string): Promise<{ artifact: string; digest: string }> {
+  const source = join(root, 'anchored-bundle-source')
+  mkdirSync(source, { recursive: true })
+  writeFileSync(join(source, 'package.json'), JSON.stringify({
+    name: 'anchored-bundle',
+    version: '1.0.0',
+    type: 'module',
+    main: './plugin.mjs',
+    files: ['plugin.mjs', 'cordis.patch.yml'],
+    dsh: { bundle: { patch: './cordis.patch.yml' } },
+  }, undefined, 2))
+  writeFileSync(join(source, 'cordis.patch.yml'), [
+    '- insert:',
+    '    - id: packed-profile-sentinel',
+    '      name: anchored-bundle',
+    '',
+  ].join('\n'))
+  writeFileSync(join(source, 'plugin.mjs'), [
+    "import { existsSync, writeFileSync } from 'node:fs'",
+    'export function apply(ctx) {',
+    "  if (process.env.RAW_READY_FILE) writeFileSync(process.env.RAW_READY_FILE, 'loaded')",
+    '  let interrupted = false',
+    '  const heartbeat = setInterval(() => {',
+    '    if (interrupted || !process.env.RAW_INTERRUPT_FILE || !existsSync(process.env.RAW_INTERRUPT_FILE)) return',
+    '    interrupted = true',
+    "    process.emit('SIGTERM')",
+    '  }, 20)',
+    '  ctx.effect(() => () => { clearInterval(heartbeat) })',
+    '}',
+    '',
+  ].join('\n'))
+  const packed = await execa('pnpm', ['pack', '--pack-destination', root], {
+    cwd: source,
+    reject: false,
+    timeout: 30_000,
+    killSignal: 'SIGKILL',
+  })
+  if (packed.exitCode !== 0) {
+    throw new Error(`fixture pnpm pack failed:\n${packed.stdout}\n${packed.stderr}`)
+  }
+  const artifact = join(root, 'anchored-bundle-1.0.0.tgz')
+  return {
+    artifact,
+    digest: `sha256:${createHash('sha256').update(readFileSync(artifact)).digest('hex')}`,
   }
 }
 
@@ -315,16 +378,92 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
     expect(bare.code).toBe(1)
     expect(bare.stdout).toBe('')
     expect(bare.stderr).toContain('--profile <name> is required')
-    const help = await runBuiltBin(['--help'])
+    const help = await runBuiltBin(['--help'], {}, undefined, ['--import', delayedStdoutRegister])
     expect(help.code).toBe(0)
+    expect(help.stderr).toBe('')
+    expect(help.stdout).toContain('Usage: dsh [options] [command] [args...]')
     expect(help.stdout).toContain('dsh --profile web')
     expect(help.stdout).toContain('dsh plugin --profile')
     expect(help.stdout).not.toMatch(/^\s+(?:tui|meta|upgrade)\b/mu)
+    expect(help.stdout.trimEnd()).toMatch(/--mutation-id <id>$/u)
+    const invalid = await runBuiltBin(
+      ['plugin', 'list'],
+      {},
+      undefined,
+      ['--import', delayedStderrRegister],
+    )
+    expect(invalid.code).toBe(1)
+    expect(invalid.stdout).toBe('')
+    expect(invalid.stderr).toBe("error: required option '--profile <name>' not specified")
     for (const removed of [['tui'], ['--config', 'x.yml'], ['-p', 'task'], ['run', 'task']]) {
       const result = await runBuiltBin(removed)
       expect(result.code).toBe(1)
     }
   }, 30_000)
+
+  it.each([
+    ['web', ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-web-app']],
+    ['headless', ['@deepseek-ai/dsh-base', '@deepseek-ai/dsh-headless']],
+  ] as const)('initializes the shipped %s Profile before the first inventory list', async (profile, bundles) => {
+    const home = mkdtempSync(join(tmpdir(), `dsh-plugin-list-${profile}-`))
+    try {
+      const first = await runBuiltBin(['plugin', '--profile', profile, 'list'], { DSH_HOME: home })
+      expect(first.code, first.stderr).toBe(0)
+      expect(first.stderr).toBe('')
+      const inventory = JSON.parse(first.stdout) as {
+        snapshot: {
+          profile: string
+          revision: number
+          effectivePath: string
+          activeGeneration: string | null
+          lastGoodGeneration: string | null
+          rollbackGeneration: string | null
+          bootStatus: string
+        }
+        active: unknown
+        staged: unknown[]
+        recoverable: unknown[]
+      }
+      expect(inventory).toMatchObject({
+        snapshot: {
+          profile,
+          revision: 0,
+          effectivePath: join(home, 'profiles', profile),
+          activeGeneration: null,
+          lastGoodGeneration: null,
+          rollbackGeneration: null,
+          bootStatus: 'live',
+        },
+        active: null,
+        staged: [],
+        recoverable: [],
+      })
+      const manifest = JSON.parse(
+        readFileSync(join(home, 'profiles', profile, 'package.json'), 'utf8'),
+      ) as { dsh: { profile: { bundles: string[] } } }
+      expect(manifest.dsh.profile.bundles).toEqual(bundles)
+
+      const repeated = await runBuiltBin(['plugin', '--profile', profile, 'list'], { DSH_HOME: home })
+      expect(repeated).toEqual(first)
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  }, 30_000)
+
+  it('rejects a missing custom Profile inventory without creating it', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'dsh-plugin-list-custom-'))
+    try {
+      const result = await runBuiltBin(['plugin', '--profile', 'custom', 'list'], { DSH_HOME: home })
+      expect(result.code).toBe(2)
+      expect(result.stdout).toBe('')
+      expect(result.stderr).toContain(
+        'profile "custom" does not exist; list initializes only shipped web and headless Profiles',
+      )
+      expect(existsSync(join(home, 'profiles', 'custom'))).toBe(false)
+    } finally {
+      rmSync(home, { recursive: true, force: true })
+    }
+  })
 
   it('routes help and usage errors without activating startup-dependent rows', async () => {
     const home = mkdtempSync(join(tmpdir(), 'dsh-app-help-'))
@@ -411,7 +550,7 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
       const result = await runBuiltBin(['--profile', 'nope'], { DSH_HOME: home })
       expect(result.code).toBe(1)
       expect(result.stderr).toContain('profile "nope" does not exist')
-      expect(result.stderr).toContain('dsh plugin --profile nope add')
+      expect(result.stderr).toContain('dsh plugin --profile nope install <artifact.tgz>')
     } finally {
       rmSync(home, { recursive: true, force: true })
     }
@@ -622,87 +761,139 @@ describe.skipIf(!existsSync(dshBin))('dsh BUILT bin (node lib/bin.js, no tsx)', 
     }
   }, 30_000)
 
-  it('anchors a relative add spec to the invoking directory, not the profile', async () => {
-    // `dsh plugin --profile x add .` from a plugin checkout must install THAT
-    // checkout — pnpm's cwd is the profile directory, so an un-anchored `.`
-    // would self-link the profile.
+  it('first-installs into the standard web template, validates, boots, restores, and reboots one exact artifact', async () => {
     const home = mkdtempSync(join(tmpdir(), 'dsh-plugin-anchor-'))
-    const checkout = mkdtempSync(join(tmpdir(), 'dsh-plugin-checkout-'))
+    const ready = join(home, 'ready')
+    const interrupt = join(home, 'interrupt')
     try {
-      writeFileSync(join(checkout, 'package.json'), JSON.stringify({
-        name: 'anchored-bundle',
-        version: '1.0.0',
-        dsh: { bundle: { patch: './cordis.patch.yml' } },
-      }))
-      writeFileSync(join(checkout, 'cordis.patch.yml'), '[]\n')
-      const result = await execa(process.execPath, [dshBin, 'plugin', '--profile', 'anchor', 'add', '.'], {
-        cwd: checkout,
-        input: '',
-        timeout: 60_000,
-        killSignal: 'SIGKILL',
-        reject: false,
-        env: { DSH_HOME: home },
-      })
-      expect(result.exitCode).toBe(0)
-      const manifest = JSON.parse(readFileSync(join(home, 'profiles', 'anchor', 'package.json'), 'utf8')) as {
-        dependencies: Record<string, string>
+      const artifact = await createExactBundleArtifact(home)
+      const installCommand = [
+        'plugin', '--profile', 'web', 'install', artifact.artifact,
+        '--package', 'anchored-bundle', '--version', '1.0.0', '--digest', artifact.digest,
+        '--mutation-id', 'built-anchor-install',
+      ] as const
+      const installed = await runBuiltBin(
+        installCommand,
+        { DSH_HOME: home },
+      )
+      expect(installed.code, installed.stderr).toBe(0)
+      expect(installed.stdout).toContain('restart required')
+      const replayed = await runBuiltBin(
+        installCommand,
+        { DSH_HOME: home },
+        undefined,
+        ['--import', delayedStdoutRegister],
+      )
+      expect(replayed.code, replayed.stderr).toBe(0)
+      expect(replayed.stdout).toBe(installed.stdout)
+      const manifest = JSON.parse(readFileSync(join(home, 'profiles', 'web', 'package.json'), 'utf8')) as {
         dsh: { profile: { bundles: string[] } }
       }
-      expect(Object.keys(manifest.dependencies)).toEqual(['anchored-bundle'])
-      expect(manifest.dsh.profile.bundles).toContain('anchored-bundle')
+      expect(manifest.dsh.profile.bundles).toEqual([
+        '@deepseek-ai/dsh-base',
+        '@deepseek-ai/dsh-web-app',
+      ])
+      expect(existsSync(join(
+        home, 'profiles', 'node_modules', '@deepseek-ai', 'dsh-base', 'package.json',
+      ))).toBe(true)
+
+      const booted = execa(process.execPath, [
+        dshBin, '--profile', 'web', '--host', '127.0.0.1', '--port', '0', '--no-open',
+      ], {
+        cwd: home,
+        input: '',
+        reject: false,
+        env: { DSH_HOME: home, RAW_READY_FILE: ready, RAW_INTERRUPT_FILE: interrupt },
+      })
+      await waitForFile(ready)
+      const verified = await waitForProfileBootStatus(home, 'verified')
+      requestProfileShutdown(booted, { interrupt })
+      const bootedResult = await booted
+      expect(bootedResult.exitCode, bootedResult.stderr).toBe(0)
+      expect(verified).toContain('"mutationId"')
 
       const removed = await runBuiltBin(
-        ['plugin', '--profile', 'anchor', 'remove', 'anchored-bundle'],
+        ['plugin', '--profile', 'web', 'uninstall', 'anchored-bundle', '--mutation-id', 'built-anchor-uninstall'],
         { DSH_HOME: home },
-        checkout,
       )
-      expect(removed.code).toBe(0)
-      const afterRemove = JSON.parse(
-        readFileSync(join(home, 'profiles', 'anchor', 'package.json'), 'utf8'),
-      ) as {
-        dependencies?: Record<string, string>
-        dsh: { profile: { bundles: string[] } }
+      expect(removed.code, removed.stderr).toBe(0)
+      expect(removed.stdout).toContain('restart required')
+      const restored = await runBuiltBin(
+        ['plugin', '--profile', 'web', 'restore', '--mutation-id', 'built-anchor-restore'],
+        { DSH_HOME: home },
+      )
+      expect(restored.code, restored.stderr).toBe(0)
+      expect(restored.stdout).toContain('restart required')
+      const restoreReceiptResult = await runBuiltBin(
+        ['plugin', '--profile', 'web', 'restore-receipt', '--mutation-id', 'built-anchor-restore'],
+        { DSH_HOME: home },
+      )
+      expect(restoreReceiptResult.code, restoreReceiptResult.stderr).toBe(0)
+      const restoreReceipt = JSON.parse(restoreReceiptResult.stdout) as {
+        profile: string
+        mutationId: string
+        status: string
+        receipt: {
+          status: string
+          operation: string
+          before: { revision: number }
+          after: { revision: number; activeGeneration: string; treeDigest: string }
+        }
       }
-      expect(Object.keys(afterRemove.dependencies ?? {})).toEqual([])
-      expect(afterRemove.dsh.profile.bundles).not.toContain('anchored-bundle')
+      expect(restoreReceipt).toMatchObject({
+        profile: 'web',
+        mutationId: 'built-anchor-restore',
+        status: 'committed',
+        receipt: {
+          status: 'committed',
+          operation: 'restore',
+        },
+      })
+      expect(typeof restoreReceipt.receipt.before.revision).toBe('number')
+      expect(restoreReceipt.receipt.after.revision).toBe(restoreReceipt.receipt.before.revision + 1)
+      expect(typeof restoreReceipt.receipt.after.activeGeneration).toBe('string')
+      expect(restoreReceipt.receipt.after.treeDigest).toMatch(/^sha256:[0-9a-f]{64}$/)
+      const restoreReplay = await runBuiltBin(
+        ['plugin', '--profile', 'web', 'restore', '--mutation-id', 'built-anchor-restore'],
+        { DSH_HOME: home },
+      )
+      expect(restoreReplay.code, restoreReplay.stderr).toBe(0)
+      expect(restoreReplay.stdout).toBe(restored.stdout)
+      const afterReplay = await runBuiltBin(['plugin', '--profile', 'web', 'list'], { DSH_HOME: home })
+      expect(afterReplay.code, afterReplay.stderr).toBe(0)
+      expect((JSON.parse(afterReplay.stdout) as { snapshot: { revision: number } }).snapshot.revision)
+        .toBe(restoreReceipt.receipt.after.revision)
+
+      rmSync(ready, { force: true })
+      rmSync(interrupt, { force: true })
+      const rebooted = execa(process.execPath, [
+        dshBin, '--profile', 'web', '--host', '127.0.0.1', '--port', '0', '--no-open',
+      ], {
+        cwd: home,
+        input: '',
+        reject: false,
+        env: { DSH_HOME: home, RAW_READY_FILE: ready, RAW_INTERRUPT_FILE: interrupt },
+      })
+      await waitForFile(ready)
+      requestProfileShutdown(rebooted, { interrupt })
+      const rebootedResult = await rebooted
+      expect(rebootedResult.exitCode, rebootedResult.stderr).toBe(0)
     } finally {
       rmSync(home, { recursive: true, force: true })
-      rmSync(checkout, { recursive: true, force: true })
     }
-  }, 90_000)
+  }, 150_000)
 
-  it('activates a dependency that gained dsh.bundle in a later update', async () => {
-    // Reconcile runs against the INSTALLED state on every successful pnpm
-    // run, so `update` (not only `add`) activates a package whose newer
-    // version declares dsh.bundle. Simulated without a registry: hand-place
-    // the installed package, flip its manifest, and run a benign pnpm verb.
-    const home = mkdtempSync(join(tmpdir(), 'dsh-plugin-update-'))
+  it('rejects arbitrary package-manager writes through the published entry', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'dsh-plugin-exact-only-'))
     try {
-      const profileDir = join(home, 'profiles', 'up')
-      const installed = join(profileDir, 'node_modules', 'late-bundle')
-      mkdirSync(installed, { recursive: true })
-      writeFileSync(join(profileDir, 'package.json'), JSON.stringify({
-        name: 'dsh-profile-up',
-        private: true,
-        dependencies: { 'late-bundle': 'file:./late-bundle' },
-        dsh: { profile: { bundles: ['@deepseek-ai/dsh-base'] } },
-      }))
-      writeFileSync(join(profileDir, 'cordis.patch.yml'), '[]\n')
-      // v1: no dsh manifest — a plain dependency.
-      writeFileSync(join(installed, 'package.json'), JSON.stringify({ name: 'late-bundle', version: '1.0.0' }))
-      const first = await runBuiltBin(['plugin', '--profile', 'up', 'root'], { DSH_HOME: home })
-      expect(first.code).toBe(0)
-      let manifest = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8')) as { dsh: { profile: { bundles: string[] } } }
-      expect(manifest.dsh.profile.bundles).toEqual(['@deepseek-ai/dsh-base'])
-      // v2: the installed package now declares dsh.bundle (an update landed).
-      writeFileSync(join(installed, 'package.json'), JSON.stringify({
-        name: 'late-bundle', version: '2.0.0', dsh: { bundle: { patch: './cordis.patch.yml' } },
-      }))
-      writeFileSync(join(installed, 'cordis.patch.yml'), '[]\n')
-      const second = await runBuiltBin(['plugin', '--profile', 'up', 'root'], { DSH_HOME: home })
-      expect(second.code).toBe(0)
-      manifest = JSON.parse(readFileSync(join(profileDir, 'package.json'), 'utf8')) as { dsh: { profile: { bundles: string[] } } }
-      expect(manifest.dsh.profile.bundles).toEqual(['@deepseek-ai/dsh-base', 'late-bundle'])
+      for (const operation of ['add', 'remove', 'root']) {
+        const result = await runBuiltBin(
+          ['plugin', '--profile', 'web', ...operation.split(' ')],
+          { DSH_HOME: home },
+        )
+        expect(result.code).toBe(2)
+        expect(result.stderr).toContain('arbitrary pnpm writes are disabled')
+      }
     } finally {
       rmSync(home, { recursive: true, force: true })
     }

@@ -6,11 +6,11 @@
 
 ## Profile 启动
 
-`dsh --profile <name>` 启动位于 `$DSH_HOME/profiles/<name>` 的 profile。生效配置树以空根节点为起点，依次叠加 profile manifest（元数据清单）的 `dsh.profile.bundles` 列表中指定的各组合包 patch、profile 自身的 `cordis.patch.yml`、home 级的 `$DSH_HOME/cordis.patch.yml`（这是各 profile 共享的机器本地偏好，因此优先于逐 profile 配置层），以及按 argv 顺序指定的各个 `--patch <path>` 覆盖层。对同一配置行，后应用的层优先。patch 会替换目标行的整个 `config` 值，而不是深度合并其中的键；patch 也可以插入新行。配置解析、schema 校验、模块解析或插件启动失败时，系统会报告错误并以非零状态退出。收到 SIGINT 或 SIGTERM 时，挂载的根节点会先 dispose（资源释放）再退出。
+`dsh --profile <name>` 会在主 Loader 存在前解析 Profile transaction snapshot，并启动其 effective path：首次 commit 前是 live `$DSH_HOME/profiles/<name>` 目录，之后是 active immutable generation。生效 tree 以空根为起点，依次叠加 `dsh.profile.bundles` 指定的各 bundle patch、Profile 自身 `cordis.patch.yml`、home-level `$DSH_HOME/cordis.patch.yml`，以及 argv 顺序中的各个 `--patch <path>`。后应用层优先；patch 会替换目标行完整 `config`，而不是 deep merge，也可以插入新行。parse、schema、resolution 或 plugin boot failure 会非零退出，且不会 acknowledgement generation。SIGINT 与 SIGTERM 会在退出前释放挂载 root。
 
-组合包名称先从 dsh 安装目录解析，再从 profile 目录解析。因此，内置组合包（`@deepseek-ai/dsh-base`、`@deepseek-ai/dsh-web-app`、`@deepseek-ai/dsh-headless`）始终来自当前运行的 `dsh` 所属的安装；树外组合包则来自 profile 中由 pnpm 管理的 `node_modules`。patch 行中的裸插件 `name` 会从 profile 目录开始，按照 Node 的模块解析规则逐级向父目录查找，直至由 dsh 维护的安装后备目录 `$DSH_HOME/profiles/node_modules`。该目录为 dsh 安装中的应用和组合包所依赖的每个包各维护一个符号链接，并在每次启动时修复这些链接。
+bundle name 先从 dsh 安装目录解析，再从 effective Profile 目录解析。因此内置 bundle（`@deepseek-ai/dsh-base`、`@deepseek-ai/dsh-web-app`、`@deepseek-ai/dsh-headless`）始终来自当前安装；树外 bundle 来自 effective tree 的 `node_modules` 真实 package 文件。patch 行中的 bare plugin `name` 从 effective Profile 逐级解析到受维护的 installation fallback。launcher 会为每次调用在私有 runtime root 下创建 `cordis.yml`。live Profile 仍作为 Loader 的显式 base URL。对于 active managed generation，launcher 会把完整 tree 复制到该私有 root，验证复制的 bytes 与内部 link 能复现选定的 `ProfileTreeDigest`，再次确认相同 transaction snapshot，并且只把私有副本作为 Loader base URL。因此，确认后替换 authoritative generation 不能提供被导入的 bytes；acknowledgement 仍以确切选定 generation 为 fence。boot 失败或 root dispose 会移除私有 root。每个私有 root name 都记录 owner PID 与 process-incarnation fingerprint；preparation 会移除确切的 dead-owner 与 PID-reuse residue，但不会等待或移除存活的并发 root。两种模式下的相对 plugin name 与 config path 都保留 Profile-relative resolution。
 
-`web` 和 `headless` profile 首次使用时会从随附模板自动初始化（`web`：base + web-app；`headless`：base + headless）。其他缺失的 profile 会显式报错，并提示运行 `dsh plugin --profile <name> add <package>`。
+`web` 和 `headless` Profile 首次使用时会从随附模板自动初始化（`web`：base + web-app；`headless`：base + headless）。其他缺失 Profile 会明确失败，并要求先提供完整 custom Profile 目录；`dsh plugin` 不会创建该目录，launcher 只会在目录存在后提供私有 `cordis.yml`。
 
 ### 应用参数
 
@@ -36,31 +36,27 @@ dsh --profile web --dump-default-config
 dsh --profile web --patch ./extra.yml --dump-config
 ```
 
-`--dump-default-config` 只打印组合包各层；`--dump-config` 额外加上 profile 的 `cordis.patch.yml`、home 级的 `$DSH_HOME/cordis.patch.yml` 和 `--patch` overlay。两者都会打印注释，标明每行由哪个文件提供，以及哪些 overlay 修改过它；`!!js` 表达式保持未求值，找不到目标的 patch 会报告到 stderr。dump 操作不会运行应用的命令行参数提供方，因此展示的是解析任何应用参数之前的组合配置树；如果调用中包含应用参数，dump 会拒绝该调用。
+`--dump-default-config` 只打印组合包各层；`--dump-config` 额外加上 profile 的 `cordis.patch.yml`、home 级的 `$DSH_HOME/cordis.patch.yml` 和 `--patch` overlay。两者都会打印注释，标明每行由哪个文件提供，以及哪些 overlay 修改过它；managed Profile 的注释会标出 authoritative generation path，渲染 bytes 则仍来自其 digest-verified 私有副本。`!!js` 表达式保持未求值，找不到目标的 patch 会报告到 stderr。dump 操作不会运行应用的命令行参数提供方，因此展示的是解析任何应用参数之前的组合配置树；如果调用中包含应用参数，dump 会拒绝该调用。
 
 ## 插件管理
 
-`dsh plugin --profile <name> <args...>` 在 profile 缺失时先初始化它（有随附模板的用模板，其他名称只装 `@deepseek-ai/dsh-base`），然后以 profile 目录为工作目录，把 `<args...>` 转发给 `pnpm`：`add`、`remove`、`why`、`update` 及其他所有 pnpm 子命令都照常可用；pnpm 必须在 PATH 上。相对路径 spec（`.`、`../plugin` 及其 `file:`/`link:` 形式）会先锚定到调用目录，因此在插件 checkout 中执行 `add .` 安装的是该 checkout，而不是 profile。每次成功运行后，系统都会根据当前安装状态更新 `dsh.profile.bundles`：如果某项依赖解析到的包在 manifest 中声明了 `"dsh": { "bundle": { "patch": "./cordis.patch.yml" } }`，该依赖就会加入配置层栈；如果某项依赖在 `update` 后获得该声明，也会随即激活。没有组合包声明的依赖仍作为普通依赖保留，并显示一次性警告；已移除的依赖则从配置层栈中删除。
+`dsh plugin` 只接受 exact transaction operation；任意 pnpm verb 与 flag 都会被拒绝。install/update 要求一个本地 `.tgz`、确切 package name/version、规范 caller SHA-256，以及可选 `--kind package|bundle`（默认 `bundle`）。uninstall 要求一个已安装 package name。configure 要求一个已安装 owner package、含 typed adapter 所生成完整规范化下一份 `cordis.patch.yml` 的文件，以及当前/下一份 SHA-256 digest。restore 发布已验证 recovery target。每次写操作都要求匹配 `[A-Za-z0-9][A-Za-z0-9._:-]{0,127}` 的 `--mutation-id`。应为一个不可变 intent 生成一次 id；完成结果不明确时，以相同 id 重试完全相同的命令。revision 或 tree conflict 会移除尚未发布的 stage，使同一 intent 能按当前 fence 重试；其他 commit error 会保留 generation，因为 publication 可能已经完成。list 不接受 mutation id，也不改变 generation 或 pointer state。读取 inventory 前，它会幂等补齐随附 `web` 或 `headless` 模板中缺失的文件；缺失 custom Profile 会直接失败，且不会创建其目录。
 
-Codex 与 Claude Code subagent provider 是两个彼此独立的可选 Bundle。可以只添加一个包、在同一命令中添加两个包，或独立移除任一包：
-
-```sh
-dsh plugin --profile <name> add @deepseek-ai/dsh-subagent-codex
-dsh plugin --profile <name> add @deepseek-ai/dsh-subagent-claude-code
-dsh plugin --profile <name> add @deepseek-ai/dsh-subagent-codex @deepseek-ai/dsh-subagent-claude-code
-dsh plugin --profile <name> remove @deepseek-ai/dsh-subagent-codex
-dsh plugin --profile <name> remove @deepseek-ai/dsh-subagent-claude-code
-```
-
-pnpm 操作成功后只会改变磁盘上的 Profile manifest 与 Bundle 列表；正在运行的 Profile 会保留本次启动时的 Bundle 集合。添加、移除或更新 Bundle 后须重启该 Profile。这个启动边界只适用于 Bundle 成员变化，Profile 或 home 中普通 `cordis.patch.yml` 的编辑通过热重载生效。下一次启动时，每个已安装 Bundle 只注册自己的休眠 Host provider；还须在复制出的 Preset 中单独启用对应工具行，新 Agent 才能看到该工具。[Codex provider README](../../../packages/subagent/subagent-codex/README.zh.md)与 [Claude Code provider README](../../../packages/subagent/subagent-claude-code/README.zh.md)负责可执行文件、身份验证、载荷与失败细节；[base Bundle 参考](../../../packages/bundle/base/README.zh.md)负责默认依赖闭包。
+`restore-receipt --mutation-id <id>` 是查询一个确切 restore 结果的 automation 接口。它打印一个严格 JSON result：要么是 `not-found`，要么是 `committed` receipt，后者绑定原 before/after snapshot、target generation 与 tree digest，以及 restart 终态。进程死亡后，该查询会完成相关持久 journal，但绝不选择或发布新 recovery target；查询缺失 custom Profile 也不会创建它。
 
 ```sh
-dsh plugin --profile tui add github:deepseek-harness/turtle-ui
-dsh plugin --profile tui remove turtle-ui
-dsh --profile tui
+dsh plugin --profile web install ./plugin-1.0.0.tgz --package plugin --version 1.0.0 --digest sha256:<64-hex> --mutation-id install-plugin-1.0.0
+dsh plugin --profile web update ./plugin-1.1.0.tgz --package plugin --version 1.1.0 --digest sha256:<64-hex> --mutation-id update-plugin-1.1.0
+dsh plugin --profile web configure plugin --patch-file ./next.cordis.patch.yml --expected-digest sha256:<64-hex> --next-digest sha256:<64-hex> --mutation-id configure-plugin-1
+dsh plugin --profile web uninstall plugin --mutation-id uninstall-plugin-1
+dsh plugin --profile web restore --mutation-id restore-plugin-1
+dsh plugin --profile web restore-receipt --mutation-id restore-plugin-1
+dsh plugin --profile web list
 ```
 
-随源码发布的 Git 托管插件会在安装期间通过 `prepare` 脚本构建，而 pnpm ≥10 默认会阻止该脚本，直到使用方明确允许。首次运行 `add` 会失败，并显示 pnpm 的 `allowBuilds` 提示；dsh 还会提示应修改该 profile 的 `pnpm-workspace.yaml`。将输出的键复制到该文件后，重新运行命令即可。安装已经构建好的 tarball 或本地 checkout 时，无需加入 `allowBuilds`。
+每个 mutation 都复制完整 effective Profile，更新确切 package graph 与 owner-managed pnpm lock record，并在有界 child 中运行真实 Web Loader activation。child 只接收进程启动、locale 和临时目录环境变量，随后使用用后即删的 home 与 state directory；ambient credential、凭据文件指针、provider endpoint、proxy、SSH agent authority 与 Node 注入选项都不会继承。这不是文件系统或网络沙箱：已接纳 plugin code 仍以 host 用户的操作系统权限执行。成功 commit 会打印 `restart required`，不会改变当前进程。下一次真实 app boot 选择该 generation，并且只有 Loader activation 成功后才 acknowledgement 为 last-good。boot failure 会保留此前 last-good。managed generation patch 不会被监听或重新读取，因此 configuration 同样跨 restart boundary；只有 home-level patch 保持热重载。
+
+P0 artifact 必须是完整 archive，不得包含普通/可选/打包 dependency、安装 lifecycle script 或 `bin` entry。真实 activation validator 目前只接纳 Web Profile。发现、下载、信任与审批发生在此 CLI boundary 之前。
 
 ## Web 别名
 
@@ -78,7 +74,7 @@ dsh web --help
 
 进程关闭时，插件树最多有 5 秒完成 dispose。首次收到 `SIGINT` 或 `SIGTERM` 时会开始优雅排空：`SIGTERM` 是监督进程发出的常规停止请求，在所有运行模式下都以 0 退出；`SIGINT` 则报告 130。第二次收到信号时会立即强制退出。如果一次性运行在正常结束时已经卡在 dispose 阶段，第一次按下 `Ctrl+C` 就会直接升级为强制退出，而不会被忽略。
 
-所有模式都将运行命令时所在的目录作为默认 workspace 根目录，以 65,536 字节渲染预算加载适用的 `AGENTS.md` 或 `CLAUDE.md` 指令，并使用内存 SQLite 会话内容索引。每次启动 profile 时，系统都会监视 profile 与 home 两个 `cordis.patch.yml` 配置层的有效变更，并以事务方式重新应用；一次性运行模式通过有界关闭流程退出，该流程会先 dispose 监视器。
+所有模式都将运行命令时所在的目录作为默认 workspace 根目录，以 65,536 字节渲染预算加载适用的 `AGENTS.md` 或 `CLAUDE.md` 指令，并使用内存 SQLite 会话内容索引。unmanaged live Profile 会监听 profile 与 home 两个 `cordis.patch.yml` 的有效变更。managed generation 会复用 boot 时解析的 Profile patch，只监听 home layer；Profile configuration 必须发布另一 generation。tree 仍 active 时发生 watcher setup failure，会在拒绝前释放完整 tree 与私有 runtime root；requested shutdown 中断 registration 时会抑制该 failure，因为该 shutdown 已持有 disposal。一次性运行模式通过有界关闭流程退出，并释放 active watcher。
 
 新会话默认使用 `workspace-write` 权限预设。Bash 和文件系统修改仅限于会话 workspace 与平台临时根目录；读取和网络访问不受限制，进程可见性则取决于所选沙箱后端——bwrap 在私有 PID 命名空间中运行命令并隐藏宿主进程，Landlock 与 Seatbelt 保持宿主进程可见性不变。`DSH_PERMISSION_MODE` 更改进程后备值。General settings 中存储的权限影响后续 Web 会话，不改变已打开的会话。
 
@@ -90,7 +86,7 @@ dsh web --help
 
 会话遥测默认留在本地。`DSH_TELEMETRY_MODE=FULL` 将每条已投影会话事件作为 OTLP/HTTP 日志流式发送，`DSH_TELEMETRY_MODE=FEEDBACK_ONLY` 则仅在记录反馈时上传会话日志后缀。`DSH_TELEMETRY_OTLP_URL` 选择其他 collector。任何非空的 `DSH_TELEMETRY_DISABLED` 都是具有最终效力的遥测强制关闭开关。随附基础配置没有遥测脱敏规则，因此显式启用的导出可能包含消息文本、工具参数和结果，以及 workspace 路径；相关部署决策见[默认关闭 Agent Note](../../../.agents/notes/implemented/feature/2026-08-10-telemetry-default-off.zh.md)。
 
-通过 `dsh plugin --profile <name> add <package-or-git-spec>` 安装外部插件组合包。安装的包拥有其依赖，并贡献其声明的 `cordis.patch.yml` 层。CLI 还随附 `@deepseek-ai/dsh-mcp-client` 作为供 patch 层使用的依赖，但默认不启用 MCP 服务器，因为每条服务器命令都是 agent（智能体）沙箱之外的受信任可执行代码。
+通过上文的确切本地 `.tgz` transaction 安装已 admission 的外部 plugin bundle。其 bundle declaration 会在 restart 后贡献 patch layer。CLI 还随附 `@deepseek-ai/dsh-mcp-client` 供 patch layer 使用，但默认不启用 MCP server，因为每条 server command 都是 agent sandbox 之外的受信任 executable code。
 
 <a id="source-execution"></a>
 

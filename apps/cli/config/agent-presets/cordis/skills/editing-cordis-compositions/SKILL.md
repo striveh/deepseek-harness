@@ -121,44 +121,20 @@ After a clean mount-validation, ask the user to start a session on the new prese
 
 `cordis_mount` evaluates JavaScript against the live runtime and disappears on restart. It is for probing, not for shipping a capability: a capability belongs in a composition file.
 
-## Native product subagents
+## Profile plugin lifecycle
 
-Codex and Claude Code providers are independent optional Profile Bundles. Install only the products a Profile needs, then restart the Profile so its Host registers those providers:
+Preset authoring does not install Host packages. The P0 CLI mutates only the `web` Profile and accepts only an already-admitted exact local `.tgz`; it does not implement registry discovery, `add`/`remove`, arbitrary package-manager flags, or native-product setup.
 
 ```sh
-dsh plugin --profile <name> add @deepseek-ai/dsh-subagent-codex
-dsh plugin --profile <name> add @deepseek-ai/dsh-subagent-claude-code
-dsh plugin --profile <name> remove @deepseek-ai/dsh-subagent-codex
-dsh plugin --profile <name> remove @deepseek-ai/dsh-subagent-claude-code
+dsh plugin --profile web install ./plugin-1.0.0.tgz --package plugin --version 1.0.0 --digest sha256:<64-hex> --kind bundle --mutation-id install-plugin-1.0.0
+dsh plugin --profile web update ./plugin-1.1.0.tgz --package plugin --version 1.1.0 --digest sha256:<64-hex> --kind bundle --mutation-id update-plugin-1.1.0
+dsh plugin --profile web configure plugin --patch-file ./next.cordis.patch.yml --expected-digest sha256:<64-hex> --next-digest sha256:<64-hex> --mutation-id configure-plugin-1
+dsh plugin --profile web uninstall plugin --mutation-id uninstall-plugin-1
+dsh plugin --profile web restore --mutation-id restore-plugin-1
+dsh plugin --profile web list
 ```
 
-Each Bundle owns its Host availability; the preset separately grants one Agent its ordinary delegation tool. Never move a product provider into the preset and never add a product-specific settings field. Removing one package withdraws only that provider on the next Profile start.
-
-Copy these disabled templates from a shipped full preset and remove `disabled` only for the products the user requested:
-
-```yaml
-- id: tool-subagent-codex
-  name: '@deepseek-ai/dsh-tool-subagent'
-  disabled: true
-  config:
-    provider: codex
-    toolName: subagent_codex
-    backgroundMode: one-shot
-    maxDepth: provider-managed
-
-- id: tool-subagent-claude-code
-  name: '@deepseek-ai/dsh-tool-subagent'
-  disabled: true
-  config:
-    provider: claude-code
-    toolName: subagent_claude_code
-    backgroundMode: one-shot
-    maxDepth: provider-managed
-```
-
-For additional named Codex or Claude Code instances, mount a separate host-plane provider row for each instance with a unique `providerName`, then add a separate preset tool row whose `provider` exactly matches that name and whose `toolName` is also unique. Keep the shipped rows for the default `codex` and `claude-code` names; do not reuse one tool row for several providers or derive either name from permission or environment settings.
-
-The two rows are independent. Leaving both disabled preserves the copied preset, enabling one exposes only that product tool, and enabling both exposes both. Production `dsh` does not install either optional provider: before enabling a row, install the matching `@deepseek-ai/dsh-subagent-codex` or `@deepseek-ai/dsh-subagent-claude-code` Bundle in the Profile and restart it. Each Bundle registers its dormant default provider and exclusively uses its pinned package-local platform CLI; additional named instances use extra host-plane rows from the same installed package. A preset cannot provide that host dependency. `backgroundMode: one-shot` keeps omitted or `false` calls in the foreground and lets explicit `run_in_background: true` return a generic Job id. Full presets already carry `tool-jobs`, while the base host carries the job registry; retain both so `job_output`, `job_list`, `job_kill`, cancellation, and completion notices stay available. Installing a Bundle or composing a preset row does not start a product, authenticate an account, select a model, probe credentials, or manage native product settings.
+Choose one `--mutation-id` matching `[A-Za-z0-9][A-Za-z0-9._:-]{0,127}` for each approved immutable write intent. If the process exits or output is ambiguous, retry the exact command with the same id; never reuse that id for different bytes, metadata, package, or operation. `list` is read-only and takes no mutation id. A successful write publishes a generation for the next process, so restart and verify the real Web Profile before claiming the plugin works.
 
 ## What not to move into a preset
 

@@ -12,7 +12,15 @@ import type { Config } from '@deepseek-ai/dsh-mcp-client'
 
 // vi.mock factories are hoisted above every import/const, so the mock fns and
 // class must be created inside vi.hoisted to exist when the factories run.
-const { mockConnect, mockClose, mockListTools, mockCallTool, mockSetNotificationHandler, MockClient } = vi.hoisted(() => {
+const {
+  mockConnect,
+  mockClose,
+  mockListTools,
+  mockCallTool,
+  mockSetNotificationHandler,
+  mockHttpTransport,
+  MockClient,
+} = vi.hoisted(() => {
   const mockConnect = vi.fn<() => Promise<void>>()
   const mockClose = vi.fn<() => Promise<void>>()
   const mockListTools = vi.fn<(_params?: Record<string, unknown>) => Promise<unknown>>()
@@ -20,6 +28,7 @@ const { mockConnect, mockClose, mockListTools, mockCallTool, mockSetNotification
     _params?: Record<string, unknown>, _compatibilitySchema?: unknown, _options?: unknown,
   ) => Promise<unknown>>()
   const mockSetNotificationHandler = vi.fn()
+  const mockHttpTransport = vi.fn()
   const mockRequest = vi.fn(async (
     request: { method: string; params?: Record<string, unknown> },
     _schema: unknown,
@@ -37,7 +46,7 @@ const { mockConnect, mockClose, mockListTools, mockCallTool, mockSetNotification
     request = mockRequest
     setNotificationHandler = mockSetNotificationHandler
   }
-  return { mockConnect, mockClose, mockListTools, mockCallTool, mockSetNotificationHandler, MockClient }
+  return { mockConnect, mockClose, mockListTools, mockCallTool, mockSetNotificationHandler, mockHttpTransport, MockClient }
 })
 
 vi.mock('@modelcontextprotocol/sdk/client/index.js', () => ({
@@ -49,12 +58,18 @@ vi.mock('@modelcontextprotocol/sdk/client/stdio.js', () => ({
 }))
 
 vi.mock('@modelcontextprotocol/sdk/client/streamableHttp.js', () => ({
-  StreamableHTTPClientTransport: vi.fn(),
+  StreamableHTTPClientTransport: mockHttpTransport,
 }))
 
 // vi.mock is hoisted above static imports, so the module under test sees the
 // mocked SDK even through a static import.
-import { apply, name, inject, Config as ConfigSchema } from '@deepseek-ai/dsh-mcp-client/src/index.ts'
+import {
+  apply,
+  name,
+  inject,
+  Config as ConfigSchema,
+  reserveMcpServerName,
+} from '@deepseek-ai/dsh-mcp-client/src/index.ts'
 
 // ---- Helpers ----
 
@@ -114,6 +129,8 @@ describe('mcp-client plugin module exports', () => {
       serverName: 'x'.repeat(33),
       command: 'echo',
     } as never)).toThrow()
+    const root = new Context()
+    expect(() => reserveMcpServerName(root, 'bad name!')).toThrow(/must match/)
   })
 
   it('Config schema accepts a valid serverName', () => {
@@ -123,6 +140,14 @@ describe('mcp-client plugin module exports', () => {
       command: 'echo',
     } as never)
     expect(resolved.serverName).toBe('github-prod_1')
+  })
+
+  it('Config schema requires an explicit HTTP redirect policy', () => {
+    expect(() => ConfigSchema({
+      transport: 'streamable-http',
+      serverName: 'web',
+      url: 'https://mcp.example.test/',
+    } as never)).toThrow()
   })
 
   it('Config schema materializes reconnect defaults and merges partial overrides', () => {
@@ -236,6 +261,43 @@ describe('apply (plugin lifecycle)', () => {
 
     expect(ctx.tools.get('mcp__srv__remote')).toBeDefined()
     expect(other.tools.get('mcp__srv__remote')).toBeDefined()
+  })
+
+  it('accepts an exact lent reservation until its dynamic owner releases it', async () => {
+    const reservation = reserveMcpServerName(ctx, stdioConfig.serverName)
+    const fiber = ctx.plugin({
+      name: 'lent-mcp-client',
+      inject,
+      apply(inner: Context, config: Config) { return apply(inner, config, reservation) },
+    }, stdioConfig)
+    await fiber
+    expect(ctx.tools.get('mcp__srv__remote')).toBeDefined()
+    expect(() => reserveMcpServerName(ctx, stdioConfig.serverName)).toThrow(/already in use/)
+
+    await fiber.dispose()
+    expect(() => reserveMcpServerName(ctx, stdioConfig.serverName)).toThrow(/already in use/)
+    reservation.release()
+    reservation.release()
+    const reused = reserveMcpServerName(ctx, stdioConfig.serverName)
+    reused.release()
+  })
+
+  it('rejects absent, released, and cross-root reservation tokens', async () => {
+    const absent = Object.freeze({ token: 'absent', release() {} })
+    await expect(apply(ctx, stdioConfig, absent))
+      .rejects.toThrow(/reservation.*absent, released, or belongs to another app root/)
+
+    const released = reserveMcpServerName(ctx, stdioConfig.serverName)
+    released.release()
+    await expect(apply(ctx, stdioConfig, released))
+      .rejects.toThrow(/reservation.*absent, released, or belongs to another app root/)
+
+    const other = await mountRegistry()
+    const crossRoot = reserveMcpServerName(other, stdioConfig.serverName)
+    await expect(apply(ctx, stdioConfig, crossRoot))
+      .rejects.toThrow(/reservation.*absent, released, or belongs to another app root/)
+    crossRoot.release()
+    await other.fiber.dispose()
   })
 
   it('logs error and registers no tools when connect fails; dispose closes the client', async () => {
@@ -391,6 +453,7 @@ describe('apply (plugin lifecycle)', () => {
       serverName: 'web',
       url: 'http://localhost:3000/mcp',
       headers: { Authorization: 'Bearer x' },
+      redirect: 'error',
       toolCallTimeoutMs: 30_000,
       failOnStartupError: false,
     }
@@ -398,6 +461,10 @@ describe('apply (plugin lifecycle)', () => {
     await apply(ctx, httpConfig)
 
     expect(mockConnect).toHaveBeenCalled()
+    expect(mockHttpTransport).toHaveBeenCalledWith(
+      new URL('http://localhost:3000/mcp'),
+      { requestInit: { headers: { Authorization: 'Bearer x' }, redirect: 'error' } },
+    )
     expect(ctx.tools.get('mcp__web__remote')).toBeDefined()
   })
 })

@@ -1416,6 +1416,8 @@ export interface StreamableHttpConfig {
   url: string
   /** Additional headers attached to MCP requests. */
   headers: Record<string, string>
+  /** Explicit Fetch redirect policy for every MCP HTTP request. */
+  redirect: 'error' | 'follow' | 'manual'
   /** Per-tool-call timeout in milliseconds. */
   toolCallTimeoutMs: number
   /** Fail plugin activation when the initial connection or tool synchronization fails. */
@@ -1437,7 +1439,27 @@ export interface ReconnectConfig {
 }
 ```
 
-Source: [`packages/mcp/mcp-client/src/index.ts:98`](../packages/mcp/mcp-client/src/index.ts)
+Source: [`packages/mcp/mcp-client/src/index.ts:160`](../packages/mcp/mcp-client/src/index.ts)
+
+<a id="deepseek-aidsh-mcp-connections-local"></a>
+
+## `@deepseek-ai/dsh-mcp-connections-local`
+
+Requires: `tools`
+
+```ts config-catalog
+/** Local provider configuration. */
+export interface Config {
+  /** Absolute or cwd-relative desired-state file; defaults under the Harness home. */
+  readonly path?: string
+  /** Harness home used only when `path` is omitted. */
+  readonly dshHome?: string
+  /** Maximum wait for another process's MCP desired-state writer. */
+  readonly lockWaitMs?: number
+}
+```
+
+Source: [`packages/mcp/mcp-connections-local/src/index.ts:56`](../packages/mcp/mcp-connections-local/src/index.ts)
 
 <a id="deepseek-aidsh-message-feedback"></a>
 
@@ -1533,6 +1555,26 @@ export interface PlanModeConfig {
 ```
 
 Source: [`packages/plan/plan-mode/src/index.ts:70`](../packages/plan/plan-mode/src/index.ts)
+
+<a id="deepseek-aidsh-profile-transactions-local"></a>
+
+## `@deepseek-ai/dsh-profile-transactions-local`
+
+```ts config-catalog
+/** Local Profile transaction provider configuration. */
+export interface Config {
+  /** Directory containing named Profile directories. */
+  profilesDir: string
+  /** Exact application package file used by production Profile bundle resolution. */
+  installAnchor: string
+  /** Maximum wait for another process's writer reservation. */
+  lockWaitMs?: number
+  /** Wall-clock budget for one isolated Loader validation. */
+  validationTimeoutMs?: number
+}
+```
+
+Source: [`packages/profile/profile-transactions-local/src/index.ts:74`](../packages/profile/profile-transactions-local/src/index.ts)
 
 <a id="deepseek-aidsh-pwsh-local"></a>
 
@@ -2409,6 +2451,34 @@ export interface Config {
 ```
 
 Source: [`packages/core/system-prompt/src/index.ts:186`](../packages/core/system-prompt/src/index.ts)
+
+<a id="deepseek-aidsh-task-continuation-driver"></a>
+
+## `@deepseek-ai/dsh-task-continuation-driver`
+
+Requires: `agents` · `sessions` · `sessionPersistence`
+
+```ts config-catalog
+/** Local durable continuation-driver configuration. */
+export interface Config {
+  /** Directory containing the versioned claim database. */
+  root: string
+  /** Maximum wait for another process's atomic claim transition. */
+  busyTimeoutMs?: number
+  /** Maximum wait for one verifier decision before the claim becomes invalid. */
+  verifierTimeoutMs?: number
+  /** Renewable cross-process authority lifetime for one consumed dispatch. */
+  dispatchLeaseMs?: number
+  /** First automatic recovery retry delay after a transient fault. */
+  recoveryRetryInitialMs?: number
+  /** Maximum exponential recovery retry delay. */
+  recoveryRetryMaxMs?: number
+  /** Read-only poll interval while another Host may create or advance durable work. */
+  recoveryPollMs?: number
+}
+```
+
+Source: [`packages/continuation/task-continuation-driver/src/index.ts:64`](../packages/continuation/task-continuation-driver/src/index.ts)
 
 <a id="deepseek-aidsh-terminal-bash"></a>
 
@@ -3305,6 +3375,8 @@ Abstract service classes — a deployment loads a concrete implementation packag
 - `@deepseek-ai/dsh-fs` — abstract `FileSystem` ([`packages/fs/fs/src/index.ts`](../packages/fs/fs/src/index.ts))
 - `@deepseek-ai/dsh-host-directory-picker` — abstract `DirectoryPicker` ([`packages/host/directory-picker/src/index.ts`](../packages/host/directory-picker/src/index.ts))
 - `@deepseek-ai/dsh-jobs` — abstract `JobRegistry` ([`packages/jobs/jobs/src/index.ts`](../packages/jobs/jobs/src/index.ts))
+- `@deepseek-ai/dsh-mcp-connections` — abstract `McpConnections` ([`packages/mcp/mcp-connections/src/index.ts`](../packages/mcp/mcp-connections/src/index.ts))
+- `@deepseek-ai/dsh-profile-transactions` — abstract `ProfileTransactions` ([`packages/profile/profile-transactions/src/index.ts`](../packages/profile/profile-transactions/src/index.ts))
 - `@deepseek-ai/dsh-sandbox` — abstract `SandboxProvider` ([`packages/sandbox/sandbox/src/index.ts`](../packages/sandbox/sandbox/src/index.ts))
 - `@deepseek-ai/dsh-session-persistence` — abstract `SessionPersistence` ([`packages/session/session-persistence/src/index.ts`](../packages/session/session-persistence/src/index.ts))
 - `@deepseek-ai/dsh-session-query` — abstract `SessionQueryEngine` ([`packages/session-query/session-query/src/index.ts`](../packages/session-query/session-query/src/index.ts))
@@ -3312,6 +3384,7 @@ Abstract service classes — a deployment loads a concrete implementation packag
 - `@deepseek-ai/dsh-shell` — abstract `ShellExecutor` ([`packages/shell/shell/src/index.ts`](../packages/shell/shell/src/index.ts))
 - `@deepseek-ai/dsh-spill` — abstract `SpillStore` ([`packages/spill/spill/src/index.ts`](../packages/spill/spill/src/index.ts))
 - `@deepseek-ai/dsh-subprocess` — abstract `SubprocessRuntime` ([`packages/subprocess/subprocess/src/index.ts`](../packages/subprocess/subprocess/src/index.ts))
+- `@deepseek-ai/dsh-task-continuation` — abstract `TaskContinuationService` ([`packages/continuation/task-continuation/src/index.ts`](../packages/continuation/task-continuation/src/index.ts))
 - `@deepseek-ai/dsh-workflow` — abstract `WorkflowEngine` ([`packages/workflow/workflow/src/index.ts`](../packages/workflow/workflow/src/index.ts))
 
 ## Library packages (no plugin entry)

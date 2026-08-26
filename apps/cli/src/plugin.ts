@@ -1,158 +1,387 @@
 /**
- * `dsh plugin --profile <name> <args...>` — profile plugin management as a
- * thin pnpm forwarder: initialize the profile on first use, run
- * `pnpm <args...>` in the profile directory, then reconcile the
- * `dsh.profile.bundles` layer list against the installed state (a dependency
- * resolving to a package that declares `dsh.bundle` joins the layer stack; a
- * removed or bundle-less dependency leaves it). Reconciling by installed
- * state, not by dependency diff, means `update` activates a package that
- * gained its `dsh.bundle` declaration in a newer version.
+ * Exact `dsh plugin` lifecycle Consumer. Every mutation stages a complete
+ * Profile through `ctx.profileTransactions`; arbitrary pnpm writes are
+ * rejected so no command can bypass the shared lock, journal, or validation.
  * @module @deepseek-ai/dsh/plugin
  */
 
-import { spawnSync } from 'node:child_process'
-import { existsSync } from 'node:fs'
+import { constants, existsSync } from 'node:fs'
+import { open } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 import {
-  DEFAULT_PROFILE_BUNDLES,
+  healProfilesModuleFallback,
   initProfile,
   PROFILE_TEMPLATES,
-  readProfileManifest,
-  resolveBundleDir,
   resolveProfileDir,
-  writeProfileManifest,
-  type ProfileManifest,
 } from '@deepseek-ai/dsh-app-boot'
-import { INSTALL_ANCHOR } from './profile-boot.ts'
+import {
+  ProfileRevisionConflictError,
+  ProfileTreeConflictError,
+  profileArtifactDigest,
+  profileContentDigest,
+  profileMutationId,
+  MAX_PROFILE_PATCH_BYTES,
+  type ExactProfileMutation,
+  type ProfileMutationId,
+} from '@deepseek-ai/dsh-profile-transactions'
+import { openProfileTransactionConsumer } from './profile-transactions.ts'
+import { INSTALL_ANCHOR } from './install-anchor.ts'
 
 const NAME = 'dsh'
 
-/**
- * Whether a resolved dependency exports a profile patch, i.e. is a bundle.
- * @param packageName - the dependency's package name.
- * @param profileDir - the profile directory (resolution anchor).
- * @returns true when the package manifest declares `dsh.bundle`.
- */
-function exportsPatch(packageName: string, profileDir: string): boolean {
-  let dir: string
+interface ArtifactCommand {
+  readonly operation: 'install' | 'update'
+  readonly artifact: string
+  readonly packageName: string
+  readonly version: string
+  readonly digest: string
+  readonly kind: 'package' | 'bundle'
+  readonly mutationId: ProfileMutationId
+}
+
+interface ConfigureCommand {
+  readonly operation: 'configure'
+  readonly packageName: string
+  readonly patchFile: string
+  readonly expectedDigest: string
+  readonly nextDigest: string
+  readonly mutationId: ProfileMutationId
+}
+
+type PluginMutationCommand =
+  | ArtifactCommand
+  | ConfigureCommand
+  | { readonly operation: 'uninstall'; readonly packageName: string; readonly mutationId: ProfileMutationId }
+
+type PluginCommand =
+  | PluginMutationCommand
+  | { readonly operation: 'restore'; readonly mutationId: ProfileMutationId }
+  | { readonly operation: 'restore-receipt'; readonly mutationId: ProfileMutationId }
+  | { readonly operation: 'list' }
+
+function parseFlags(args: readonly string[], allowed: readonly string[]): { positional: string[]; flags: Map<string, string> } {
+  const positional: string[] = []
+  const flags = new Map<string, string>()
+  for (let index = 0; index < args.length; index += 1) {
+    const argument = args[index]
+    /* v8 ignore next -- the loop condition guarantees this indexed element. */
+    if (argument === undefined) throw new Error(`${NAME}: plugin argument index is outside the parsed command`)
+    if (!argument.startsWith('--')) {
+      positional.push(argument)
+      continue
+    }
+    if (!allowed.includes(argument) || flags.has(argument)) {
+      throw new Error(`${NAME}: unsupported or duplicate plugin option ${JSON.stringify(argument)}`)
+    }
+    const value = args[index + 1]
+    if (value === undefined || value.startsWith('--')) {
+      throw new Error(`${NAME}: plugin option ${argument} needs one value`)
+    }
+    flags.set(argument, value)
+    index += 1
+  }
+  return { positional, flags }
+}
+
+function requiredFlag(flags: ReadonlyMap<string, string>, name: string): string {
+  const value = flags.get(name)
+  if (value === undefined || value === '') throw new Error(`${NAME}: plugin option ${name} is required`)
+  return value
+}
+
+function requiredMutationId(flags: ReadonlyMap<string, string>): ProfileMutationId {
+  return profileMutationId(requiredFlag(flags, '--mutation-id'))
+}
+
+function parsePluginCommand(args: readonly string[]): PluginCommand {
+  const [operation, ...rest] = args
+  if (operation === 'install' || operation === 'update') {
+    const parsed = parseFlags(rest, ['--package', '--version', '--digest', '--kind', '--mutation-id'])
+    const [artifact] = parsed.positional
+    if (parsed.positional.length !== 1 || artifact === undefined) {
+      throw new Error(`${NAME}: plugin ${operation} needs exactly one local .tgz artifact`)
+    }
+    const kind = parsed.flags.get('--kind') ?? 'bundle'
+    if (kind !== 'package' && kind !== 'bundle') throw new Error(`${NAME}: --kind must be package or bundle`)
+    return {
+      operation,
+      artifact: resolve(artifact),
+      packageName: requiredFlag(parsed.flags, '--package'),
+      version: requiredFlag(parsed.flags, '--version'),
+      digest: requiredFlag(parsed.flags, '--digest'),
+      kind,
+      mutationId: requiredMutationId(parsed.flags),
+    }
+  }
+  if (operation === 'uninstall') {
+    const parsed = parseFlags(rest, ['--mutation-id'])
+    const [packageName] = parsed.positional
+    if (parsed.positional.length !== 1 || packageName === undefined || packageName === '') {
+      throw new Error(`${NAME}: plugin uninstall needs one exact package name`)
+    }
+    return { operation, packageName, mutationId: requiredMutationId(parsed.flags) }
+  }
+  if (operation === 'configure') {
+    const parsed = parseFlags(rest, ['--patch-file', '--expected-digest', '--next-digest', '--mutation-id'])
+    const [packageName] = parsed.positional
+    if (parsed.positional.length !== 1 || packageName === undefined) {
+      throw new Error(`${NAME}: plugin configure needs one installed package name`)
+    }
+    return {
+      operation,
+      packageName,
+      patchFile: resolve(requiredFlag(parsed.flags, '--patch-file')),
+      expectedDigest: requiredFlag(parsed.flags, '--expected-digest'),
+      nextDigest: requiredFlag(parsed.flags, '--next-digest'),
+      mutationId: requiredMutationId(parsed.flags),
+    }
+  }
+  if (operation === 'restore') {
+    const parsed = parseFlags(rest, ['--mutation-id'])
+    if (parsed.positional.length > 0) throw new Error(`${NAME}: plugin restore takes no positional arguments`)
+    return { operation, mutationId: requiredMutationId(parsed.flags) }
+  }
+  if (operation === 'restore-receipt') {
+    const parsed = parseFlags(rest, ['--mutation-id'])
+    if (parsed.positional.length > 0) throw new Error(`${NAME}: plugin restore-receipt takes no positional arguments`)
+    return { operation, mutationId: requiredMutationId(parsed.flags) }
+  }
+  if (operation === 'list') {
+    if (rest.length > 0) throw new Error(`${NAME}: plugin list takes no additional arguments`)
+    return { operation }
+  }
+  throw new Error(
+    `${NAME}: plugin accepts only install, update, uninstall, configure, restore, restore-receipt, or list; arbitrary pnpm writes are disabled`,
+  )
+}
+
+interface PatchFileHandle {
+  stat(): Promise<{ isFile(): boolean; size: number }>
+  read(buffer: Buffer, offset: number, length: number, position: number): Promise<{ bytesRead: number }>
+  close(): Promise<void>
+}
+
+type OpenPatchFile = (path: string, flags: number) => Promise<PatchFileHandle>
+
+/** Read one regular patch file without buffering beyond the Profile protocol limit. */
+export async function readRegularUtf8(path: string, openFile: OpenPatchFile = open): Promise<string> {
+  const portableConstants: Partial<typeof constants> = constants
+  /* v8 ignore next -- supported Node releases expose O_NOFOLLOW; the fallback is for portable typing. */
+  const noFollow = portableConstants.O_NOFOLLOW ?? 0
+  const handle = await openFile(path, constants.O_RDONLY | noFollow)
+  let primary: { readonly error: unknown } | null = null
   try {
-    dir = resolveBundleDir(NAME, packageName, INSTALL_ANCHOR, profileDir)
-  } catch {
-    return false // pnpm reported success yet the package is unresolvable — treat as plain
-  }
-  const manifest = readProfileManifest(NAME, dir)
-  return manifest.dsh?.bundle?.patch !== undefined
-}
-
-/**
- * Reconcile `dsh.profile.bundles` against the installed state: pnpm has
- * already written the real installed names (so a git/path/tarball/alias spec
- * on the command line reconciles by its true package name) and materialized
- * the packages. A dependency that resolves to a `dsh.bundle`-declaring
- * package joins the layer stack (appended in dependency order); a
- * dependency-listed name that no longer does — removed, or the installed
- * version dropped the declaration — leaves it. In-box bundles from the
- * profile template are not dependencies and are never touched. Warns once
- * per newly-added bundle-less dependency (a plain library is fine; the
- * warning is orientation).
- */
-function reconcilePlugins(before: ProfileManifest, profileDir: string): void {
-  const after = readProfileManifest(NAME, profileDir)
-  const beforeDeps = new Set(Object.keys(before.dependencies ?? {}))
-  const dependencies = Object.keys(after.dependencies ?? {})
-  const plugins = after.dsh?.profile?.bundles ?? []
-  let changed = false
-  for (const packageName of dependencies) {
-    const isBundle = exportsPatch(packageName, profileDir)
-    if (isBundle && !plugins.includes(packageName)) {
-      plugins.push(packageName)
-      changed = true
-    } else if (!isBundle && !beforeDeps.has(packageName)) {
-      process.stderr.write(
-        `${NAME}: warning: ${packageName} declares no dsh.bundle — installed as a plain dependency, not a profile layer `
-        + '(a later update that gains one activates it automatically)\n',
-      )
+    const info = await handle.stat()
+    if (!info.isFile()) throw new Error(`${NAME}: patch input ${path} must be a regular file`)
+    if (info.size > MAX_PROFILE_PATCH_BYTES) {
+      throw new Error(`${NAME}: patch input ${path} exceeds ${String(MAX_PROFILE_PATCH_BYTES)} bytes`)
+    }
+    const bytes = Buffer.allocUnsafe(MAX_PROFILE_PATCH_BYTES + 1)
+    let position = 0
+    while (position < bytes.length) {
+      const result = await handle.read(bytes, position, bytes.length - position, position)
+      if (result.bytesRead === 0) break
+      position += result.bytesRead
+    }
+    if (position > MAX_PROFILE_PATCH_BYTES) {
+      throw new Error(`${NAME}: patch input ${path} exceeds ${String(MAX_PROFILE_PATCH_BYTES)} bytes`)
+    }
+    try {
+      return new TextDecoder('utf-8', { fatal: true }).decode(bytes.subarray(0, position))
+    } catch (cause) {
+      throw new Error(`${NAME}: patch input ${path} must contain valid UTF-8`, { cause })
+    }
+  } catch (error) {
+    primary = { error }
+    throw error
+  } finally {
+    try {
+      await handle.close()
+    } catch (closeError) {
+      if (primary !== null) {
+        throw new AggregateError(
+          [primary.error, closeError],
+          `${errorMessage(primary.error)}; patch descriptor close also failed`,
+          { cause: primary.error },
+        )
+      }
+      throw closeError
     }
   }
-  const dependencySet = new Set(dependencies)
-  for (const packageName of [...plugins]) {
-    // Only dependency-managed entries are subject to removal; template
-    // bundles (dsh-base and friends) are not dependencies.
-    const wasDependency = beforeDeps.has(packageName) || dependencySet.has(packageName)
-    const stillBundle = dependencySet.has(packageName) && exportsPatch(packageName, profileDir)
-    if (wasDependency && !stillBundle) {
-      plugins.splice(plugins.indexOf(packageName), 1)
-      changed = true
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
+function mutationOf(command: PluginMutationCommand, nextUtf8?: string): ExactProfileMutation {
+  if (command.operation === 'uninstall') {
+    return { operation: command.operation, packageName: command.packageName }
+  }
+  if (command.operation === 'configure') {
+    /* v8 ignore next -- the command runner reads configure bytes before calling this helper. */
+    if (nextUtf8 === undefined) throw new Error(`${NAME}: configure patch bytes were not read`)
+    return {
+      operation: 'configure',
+      packageName: command.packageName,
+      patch: {
+        expectedDigest: profileContentDigest(command.expectedDigest),
+        nextUtf8,
+        nextDigest: profileContentDigest(command.nextDigest),
+      },
     }
   }
-  if (!changed) return
-  after.dsh = { ...after.dsh, profile: { ...after.dsh?.profile, bundles: plugins } }
-  writeProfileManifest(profileDir, after)
+  return {
+    operation: command.operation,
+    kind: command.kind,
+    packageName: command.packageName,
+    version: command.version,
+    artifact: {
+      path: command.artifact,
+      digest: profileArtifactDigest(command.digest),
+    },
+  }
 }
 
-/**
- * Rewrite relative filesystem specs against the user's invoking directory.
- * pnpm runs with cwd = the profile directory, so a bare `.` or `../plugin`
- * (or their `file:`/`link:` forms) would silently resolve inside the profile
- * — `add .` from a plugin checkout would self-link the profile. Absolute
- * specs, registry names, and every other pnpm argument pass through
- * untouched.
- * @param argument - one pnpm argument, verbatim from argv.
- * @param cwd - the directory `dsh` was invoked from.
- * @returns the argument with a relative path spec anchored to `cwd`.
- */
-function anchorPathSpec(argument: string, cwd: string): string {
-  const match = /^(?<prefix>(?:file|link):)?(?<path>\.{1,2}(?:[/\\].*)?)$/.exec(argument)
-  if (match?.groups?.path === undefined) return argument
-  // A bare path stays bare and a prefixed spec keeps its prefix: pnpm's
-  // link-vs-copy semantics differ between `file:` and a plain directory
-  // path, and the anchor must not change which one the user asked for.
-  const prefix = match.groups.prefix ?? ''
-  return `${prefix}${resolve(cwd, match.groups.path)}`
+/** Initialize one shipped Profile template, or leave a custom Profile untouched. */
+function initializeShippedProfile(profile: string): { readonly dir: string; readonly created: boolean } | undefined {
+  const bundles = Object.hasOwn(PROFILE_TEMPLATES, profile) ? PROFILE_TEMPLATES[profile] : undefined
+  if (bundles === undefined) return undefined
+  const dir = resolveProfileDir(profile)
+  const created = !existsSync(join(dir, 'package.json'))
+  // initProfile preserves existing files and fills any absent companions. Run
+  // it even when package.json exists so a process killed during first
+  // initialization can resume from the files already published.
+  initProfile(dir, bundles)
+  return { dir, created }
 }
 
-/**
- * Run one `dsh plugin` invocation: init if needed, forward to pnpm, reconcile.
- * @param profile - the profile name.
- * @param args - pnpm arguments with relative path specs anchored to the invoking directory.
- * @returns the pnpm exit code.
- */
-export function runPlugin(profile: string, args: readonly string[]): number {
+function ensureInstallProfile(profile: string): void {
+  const initialized = initializeShippedProfile(profile)
+  /* v8 ignore next -- runPlugin admits only the shipped web template before calling this helper. */
+  if (initialized === undefined) throw new Error(`${NAME}: P0 plugin mutations support the web Profile only`)
+  if (initialized.created) process.stderr.write(`${NAME}: initialized profile ${profile} at ${initialized.dir}\n`)
+}
+
+/** Materialize shipped templates before inventory; a missing custom Profile remains caller-owned. */
+function ensureListProfile(profile: string): void {
+  if (initializeShippedProfile(profile) !== undefined) return
   const dir = resolveProfileDir(profile)
   if (!existsSync(join(dir, 'package.json'))) {
-    initProfile(dir, PROFILE_TEMPLATES[profile] ?? DEFAULT_PROFILE_BUNDLES)
-    process.stderr.write(`${NAME}: initialized profile ${profile} at ${dir}\n`)
+    throw new Error(
+      `profile ${JSON.stringify(profile)} does not exist; list initializes only shipped web and headless Profiles; `
+      + 'create a complete custom Profile directory before listing',
+    )
   }
-  const before = readProfileManifest(NAME, dir)
-  // Windows resolves pnpm through its .cmd shim, which spawn() refuses
-  // without a shell since the CVE-2024-27980 hardening.
-  const result = spawnSync('pnpm', args.map(argument => anchorPathSpec(argument, process.cwd())), {
-    cwd: dir,
-    stdio: 'inherit',
-    shell: process.platform === 'win32',
-  })
-  if (result.error !== undefined) {
-    const code = (result.error as NodeJS.ErrnoException).code
-    if (code === 'ENOENT') {
-      process.stderr.write(`${NAME}: pnpm not found on PATH — install pnpm to manage profile plugins\n`)
-      return 127
+}
+
+/**
+ * Run one exact `dsh plugin` operation through the Profile transaction owner.
+ * @param profile - named Profile.
+ * @param args - strict lifecycle command arguments.
+ * @returns zero on success and two on rejected input or mutation.
+ */
+export async function runPlugin(profile: string, args: readonly string[]): Promise<number> {
+  try {
+    const command = parsePluginCommand(args)
+    if (command.operation !== 'list' && command.operation !== 'restore-receipt' && profile !== 'web') {
+      throw new Error(`${NAME}: P0 plugin mutations support the web Profile only`)
     }
-    throw result.error
-  }
-  const exitCode = result.status ?? 1
-  if (exitCode === 0) {
-    reconcilePlugins(before, dir)
-  } else {
-    // pnpm's own diagnostics name pnpm-workspace.yaml without saying WHICH
-    // one; the profile owns it, and the commonest failure here is pnpm ≥10
-    // blocking a git dependency's prepare (build) script until allowlisted.
-    process.stderr.write(`${NAME}: pnpm failed in profile directory ${dir}\n`)
-    if (args.some(argument => /^git\+|^github:|\.git(?:#|$)/.test(argument))) {
-      process.stderr.write(
-        `${NAME}: git-hosted plugins build on install via their prepare script, which pnpm blocks until allowed — `
-        + `add the exact key pnpm printed above under allowBuilds in ${join(dir, 'pnpm-workspace.yaml')}, then re-run\n`,
+    if (command.operation === 'install') ensureInstallProfile(profile)
+    if (command.operation === 'list') ensureListProfile(profile)
+    const configureUtf8 = command.operation === 'configure' ? await readRegularUtf8(command.patchFile) : undefined
+    const consumer = await openProfileTransactionConsumer(profile)
+    let primary: { readonly error: unknown } | null = null
+    try {
+      if (command.operation === 'list') {
+        process.stdout.write(`${JSON.stringify(await consumer.transactions.list(consumer.profile), null, 2)}\n`)
+        return 0
+      }
+      if (command.operation === 'restore-receipt') {
+        const receipt = await consumer.transactions.getRestoreReceipt({
+          profile: consumer.profile,
+          mutationId: command.mutationId,
+        })
+        process.stdout.write(`${JSON.stringify({
+          profile: consumer.profile,
+          mutationId: command.mutationId,
+          status: receipt === null ? 'not-found' : 'committed',
+          receipt,
+        }, null, 2)}\n`)
+        return 0
+      }
+      const snapshot = await consumer.transactions.snapshot(consumer.profile)
+      if (command.operation === 'restore') {
+        const receipt = await consumer.transactions.restoreLastGood({
+          profile: consumer.profile,
+          mutationId: command.mutationId,
+          expectedRevision: snapshot.revision,
+          expectedTreeDigest: snapshot.treeDigest,
+        })
+        process.stdout.write(`${NAME}: restored generation ${String(receipt.after.activeGeneration)}; restart required\n`)
+        return 0
+      }
+      const mutation = mutationOf(command, configureUtf8)
+      if (command.operation === 'install') {
+        // A first plugin mutation reaches validation before ordinary profile
+        // boot. Establish the same installation-owned module fallback that
+        // app boot maintains so the standard base/web rows resolve unchanged.
+        healProfilesModuleFallback(INSTALL_ANCHOR)
+      }
+      const staged = await consumer.transactions.stage({
+        profile: consumer.profile,
+        mutationId: command.mutationId,
+        expectedRevision: snapshot.revision,
+        expectedTreeDigest: snapshot.treeDigest,
+        mutation,
+      })
+      const receipt = await (async () => {
+        try {
+          return await consumer.transactions.commit({
+            profile: consumer.profile,
+            expectedRevision: snapshot.revision,
+            expectedTreeDigest: snapshot.treeDigest,
+            generation: staged.generation,
+          })
+        } catch (error) {
+          if (!(error instanceof ProfileRevisionConflictError) && !(error instanceof ProfileTreeConflictError)) {
+            throw error
+          }
+          try {
+            await consumer.transactions.abort({ profile: consumer.profile, generation: staged.generation })
+          } catch (abortError) {
+            throw new AggregateError(
+              [error, abortError],
+              `${errorMessage(error)}; staged Profile generation abort also failed`,
+              { cause: error },
+            )
+          }
+          throw error
+        }
+      })()
+      process.stdout.write(
+        `${NAME}: committed generation ${String(receipt.after.activeGeneration)} at revision ${String(receipt.after.revision)}; restart required\n`,
       )
+      return 0
+    } catch (error) {
+      primary = { error }
+      throw error
+    } finally {
+      try {
+        await consumer.close()
+      } catch (closeError) {
+        if (primary !== null) {
+          throw new AggregateError(
+            [primary.error, closeError],
+            `${errorMessage(primary.error)}; Profile transaction owner close also failed`,
+            { cause: primary.error },
+          )
+        }
+        throw closeError
+      }
     }
+  } catch (error) {
+    process.stderr.write(`${NAME}: ${errorMessage(error)}\n`)
+    return 2
   }
-  return exitCode
 }

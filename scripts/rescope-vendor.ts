@@ -200,17 +200,35 @@ const EXACT_EDITS: readonly ExactEdit[] = [
     // The rescoped name is already covered by the `@deepseek-ai/.+` pattern beside it.
     id: 'knip-logger-console',
     file: 'knip.json',
-    find: `      "ignoreDependencies": [
+    find: `    "apps/cli": {
+      "entry": [
+        "tests/**/*.spec.ts",
+        "tests/**/*.e2e.ts",
+        "tests/**/*.snapshot.ts"
+      ],
+      "project": [
+        "src/**/*.ts",
+        "tests/**/*.ts"
+      ],
+      "ignoreDependencies": [
         "@cordisjs/plugin-logger-console",
         "@deepseek-ai/.+"
       ]
-    },
-    "packages/util/home": {`,
-    replace: `      "ignoreDependencies": [
+    }`,
+    replace: `    "apps/cli": {
+      "entry": [
+        "tests/**/*.spec.ts",
+        "tests/**/*.e2e.ts",
+        "tests/**/*.snapshot.ts"
+      ],
+      "project": [
+        "src/**/*.ts",
+        "tests/**/*.ts"
+      ],
+      "ignoreDependencies": [
         "@deepseek-ai/.+"
       ]
-    },
-    "packages/util/home": {`,
+    }`,
     expect: 1,
   },
   {
@@ -348,7 +366,7 @@ const VENDORED_LIBRARY = /^@deepseek-ai\\/(cosmokit|schemastery)(\\/|$)/
     id: 'vendoring-cookbook-name-invariant-zh',
     file: 'docs/cookbook/adding-a-vendored-package.zh.md',
     find: '保留上游的 `name`/`version`/`exports`/`type`',
-    replace: '改写 `name` 的 scope（[映射](../rescope.md)），保留上游的 `version`/`exports`/`type`',
+    replace: '改写 `name` 的 scope（[映射](../rescope.zh.md)），保留上游的 `version`/`exports`/`type`',
     expect: 1,
   },
   {

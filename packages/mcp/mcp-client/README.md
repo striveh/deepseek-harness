@@ -25,6 +25,7 @@ One plugin instance per MCP server in `cordis.yml`:
     serverName: web
     transport: streamable-http
     url: http://localhost:3000/mcp
+    redirect: error
     headers:
       Authorization: !!js '`Bearer ${process.env.MCP_TOKEN}`'
 ```
@@ -43,6 +44,7 @@ The model sees `mcp__github__create_issue`, `mcp__web__search`, … — the same
 | `cwd` | stdio | no | Working directory for the child process |
 | `url` | http | yes | MCP server URL |
 | `headers` | http | no | Extra headers (e.g. auth tokens) |
+| `redirect` | http | yes | Fetch redirect policy: `"error"`, `"follow"`, or `"manual"`; managed Extension Center entries use `"error"` |
 | `toolCallTimeoutMs` | both | no | Timeout per `callTool` invocation (default 60000) |
 | `failOnStartupError` | both | no | Reject plugin activation when initial connection or tool synchronization fails (default `false`) |
 | `reconnect.enabled` | both | no | Reconnect automatically after a lost connection (default `true`) |
@@ -55,7 +57,7 @@ The model sees `mcp__github__create_issue`, `mcp__web__search`, … — the same
 Every MCP tool has two names: the raw MCP name (sent on the wire in `tools/call`) and the public name `mcp__<serverName>__<rawName>` registered on `ctx.tools`. Public names are normalized to the DeepSeek function-name contract (64 chars, `[A-Za-z0-9_-]`); when replacement or truncation changes the name, a deterministic 12-hex-char hash of `(serverName, rawName)` is appended so distinct tools never collapse into one name. Names are pure functions of `(serverName, rawName)` — connection order, re-syncs, and other servers never rename a tool.
 
 - Two servers publishing the same raw name (e.g. `search`) coexist under their namespaces.
-- A duplicate `serverName` across live instances fails the later plugin instance at load.
+- A duplicate `serverName` across live instances fails the later plugin instance at load, including an instance that has not discovered any tools. A dynamic lifecycle owner can reserve the app-root name before committing desired state, lend the exact opaque token to its child `mcp-client`, and release it only after that child reaches quiescence.
 - A server listing the same tool name twice is rejected as an invalid tool list.
 - A foreign registration squatting on this server's namespace rolls back the whole generation (never a partial set), with a loud error.
 

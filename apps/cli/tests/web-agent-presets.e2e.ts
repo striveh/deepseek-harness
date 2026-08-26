@@ -4,7 +4,7 @@ import { tmpdir } from 'node:os'
 import { fileURLToPath } from 'node:url'
 import { dirname, join } from 'node:path'
 import { Context } from '@deepseek-ai/cordis'
-import { boot, healProfilesModuleFallback, loadOverlayPatches, loadProfile } from '@deepseek-ai/dsh-app-boot'
+import { boot, healProfilesModuleFallback, initProfile, loadOverlayPatches, loadProfile } from '@deepseek-ai/dsh-app-boot'
 import { provideCmdline } from '@deepseek-ai/dsh-cmdline'
 import { SessionId } from '@deepseek-ai/dsh-session'
 import type { Agent } from '@deepseek-ai/dsh-agent'
@@ -117,6 +117,7 @@ async function bootWeb(
   healProfilesModuleFallback(INSTALL_ANCHOR, home)
   const profileDir = join(home, 'profiles', 'spec')
   await mkdir(profileDir, { recursive: true })
+  if (profileBundles !== undefined) initProfile(profileDir, profileBundles)
   // Product Bundles are installed into the Profile, not the dsh app. Model
   // pnpm's package link for only the selected products; their own production
   // dependencies resolve from the linked workspace packages, while shared
@@ -143,6 +144,7 @@ async function bootWeb(
   const rootConfig = join(profileDir, 'cordis.yml')
   await writeFile(rootConfig, '[]\n')
   return await boot('dsh-test', rootConfig, [...bundlePatches, ...overrides], (bootCtx) => {
+    bootCtx.provide('dshInstallAnchor', INSTALL_ANCHOR)
     provideCmdline(bootCtx, { args: [], exit: () => {} })
   })
 }
@@ -361,14 +363,22 @@ describe('the shipped Web composition', () => {
     }
   })
 
-  it('ships the composition-authoring skill inside the preset directory', async () => {
+  it('ships the composition-authoring skill with the exact Profile lifecycle', async () => {
     // The preset's skill root is derived from its own `baseUrl`, so the skill
     // travels with the directory wherever the preset is installed.
     const skill = join(
       CONFIG_DIR, 'agent-presets', 'cordis', 'skills', 'editing-cordis-compositions', 'SKILL.md',
     )
 
-    expect((await readFile(skill, 'utf8')).startsWith('---\nname: editing-cordis-compositions')).toBe(true)
+    const content = await readFile(skill, 'utf8')
+    expect(content.startsWith('---\nname: editing-cordis-compositions')).toBe(true)
+    expect(content).toContain('dsh plugin --profile web install ./plugin-1.0.0.tgz')
+    expect(content).toContain('--mutation-id install-plugin-1.0.0')
+    expect(content).toContain('dsh plugin --profile web restore --mutation-id restore-plugin-1')
+    expect(content).not.toContain('dsh plugin --profile <name> add')
+    expect(content).not.toContain('dsh plugin --profile <name> remove')
+    expect(content).not.toContain('Native product subagents')
+    expect(content).not.toContain('@deepseek-ai/dsh-subagent')
   })
 
   it('merges the global skill layer into a preset agent\'s catalog, keeping local discovery preset-side', async () => {

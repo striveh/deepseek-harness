@@ -20,6 +20,15 @@ flowchart LR
   pkg_llm_replay["llm-replay"]
   pkg_agent_loop["agent-loop"]
   pkg_compaction_basic["compaction-basic"]
+  pkg_mcp_connections["mcp-connections"]
+  svc_mcpConnections["ctx.mcpConnections<br/>Managed MCP connection owner"]
+  pkg_mcp_connections_local["mcp-connections-local"]
+  pkg_profile_transactions["profile-transactions"]
+  svc_profileTransactions["ctx.profileTransactions<br/>Profile generation transactions"]
+  pkg_profile_transactions_local["profile-transactions-local"]
+  pkg_task_continuation["task-continuation"]
+  svc_taskContinuations["ctx.taskContinuations<br/>Durable task continuation"]
+  pkg_task_continuation_driver["task-continuation-driver"]
   pkg_token_meter["token-meter"]
   svc_tokenMeter["ctx.tokenMeter<br/>Replay token measurement"]
   pkg_compaction_tool_result_pruner["compaction-tool-result-pruner"]
@@ -247,10 +256,14 @@ flowchart LR
   pkg_llm_replay --> svc_llm
   pkg_lsp --> svc_lsp
   pkg_lsp_local --> svc_lsp
+  pkg_mcp_connections --> svc_mcpConnections
+  pkg_mcp_connections_local --> svc_mcpConnections
   pkg_message_feedback --> svc_messageFeedback
   pkg_modules --> svc_clientModules
   pkg_permission_presets --> svc_permissionPresets
   pkg_plan_mode --> svc_planMode
+  pkg_profile_transactions --> svc_profileTransactions
+  pkg_profile_transactions_local --> svc_profileTransactions
   pkg_pwsh_local --> svc_shell
   pkg_sandbox --> svc_sandbox
   pkg_sandbox_local --> svc_sandbox
@@ -293,6 +306,8 @@ flowchart LR
   pkg_subprocess_e2b --> svc_subprocess
   pkg_subprocess_local --> svc_subprocess
   pkg_system_prompt --> svc_systemPrompt
+  pkg_task_continuation --> svc_taskContinuations
+  pkg_task_continuation_driver --> svc_taskContinuations
   pkg_terminal --> svc_terminals
   pkg_terminal_bash --> svc_terminals
   pkg_token_meter --> svc_tokenMeter
@@ -429,6 +444,9 @@ flowchart LR
 | --- | --- | --- | --- | --- | --- | --- |
 | `ctx.attachments` | `seam` | [`attachment`](../packages/attachment/attachment) | [`attachment-local`](../packages/attachment/attachment-local) | `host-runtime`, [`llm-pi-ai`](../packages/llm/llm-pi-ai) | - | 宿主会在会话事件之前提交已接受的图片；提供方适配器将已授权的持久引用解析为提供方原生内容。 |
 | `ctx.llm` | `seam` | [`llm`](../packages/llm/llm) | [`llm-deepseek`](../packages/llm/llm-deepseek), [`llm-pi-ai`](../packages/llm/llm-pi-ai), [`llm-replay`](../packages/test-support/llm-replay) | [`agent-loop`](../packages/core/agent-loop), [`compaction-basic`](../packages/compaction/compaction-basic) | - | 适配器注册提供方实现；agent loop（智能体循环）与压缩功能调用提供方无关的流服务。 |
+| `ctx.mcpConnections` | `seam` | [`mcp-connections`](../packages/mcp/mcp-connections) | [`mcp-connections-local`](../packages/mcp/mcp-connections-local) | - | - | 提供方负责带 revision 的期望状态、动态 client fiber、合格的 Tool generation 与持久恢复；树外管理插件消费该服务。 |
+| `ctx.profileTransactions` | `seam` | [`profile-transactions`](../packages/profile/profile-transactions) | [`profile-transactions-local`](../packages/profile/profile-transactions-local) | - | - | 提供方 staging 并验证不可变 generation，发布受 revision 保护的状态，记录 last-good 启动确认，并通过同一 owner 恢复；dsh CLI 是仓库内消费方。 |
+| `ctx.taskContinuations` | `seam` | [`task-continuation`](../packages/continuation/task-continuation) | [`task-continuation-driver`](../packages/continuation/task-continuation-driver) | - | - | 驱动器持久化由 verifier 门控的 claim，并至多派发一次绑定的 Agent 消息；树外工作流插件负责预留并验证 claim。 |
 | `ctx.tokenMeter` | `core` | [`token-meter`](../packages/llm/token-meter) | - | [`compaction-basic`](../packages/compaction/compaction-basic) | - | 拥有按会话隔离的回放折叠区；压力消费方共享不可变且带修订版本的测量结果。 |
 | `ctx.toolResultPruner` | `core` | [`compaction-tool-result-pruner`](../packages/compaction/compaction-tool-result-pruner) | - | [`compaction-basic`](../packages/compaction/compaction-basic) | - | 在摘要压缩前，通过可回放的单节点表层替换来改写过大的当前工具结果。 |
 | `ctx.sessions` | `core` | [`session`](../packages/core/session) | - | [`agent-loop`](../packages/core/agent-loop), [`agent`](../packages/core/agent), [`session-persistence`](../packages/session/session-persistence), [`session-query`](../packages/session-query/session-query), [`session-query-sqlite`](../packages/session-query/session-query-sqlite), `subagent-inprocess`, [`invariants`](../packages/runtime-diagnostics/invariants), [`message-feedback`](../packages/feedback/message-feedback) | - | 拥有仅追加的 Session 实例，并发出持久的会话事件流。 |

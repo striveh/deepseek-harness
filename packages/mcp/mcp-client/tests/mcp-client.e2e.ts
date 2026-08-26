@@ -518,6 +518,7 @@ describe('streamable-http — in-process MCP server', () => {
       serverName: 'web',
       url: baseUrl,
       headers: { Authorization: 'Bearer e2e-test-token' },
+      redirect: 'error',
       toolCallTimeoutMs: 15_000,
       failOnStartupError: false,
     }

@@ -14,6 +14,7 @@ import {
   type HarvestedLog,
   type NormalizeContext,
 } from '@deepseek-ai/dsh-acp-snapshot'
+import { initProfile, PROFILE_TEMPLATES } from '@deepseek-ai/dsh-app-boot'
 import { LOADER_SMOKE_TEST_TIMEOUT_MS, runLoaderSmoke } from '@deepseek-ai/dsh-loader-smoke'
 import {
   decompressZstdFrame,
@@ -235,6 +236,9 @@ async function persistedLogs(cwd: string, root: string = join(cwd, '.sessions'))
 /** Install the keyless product-CLI adapter into the temporary headless profile. */
 async function prepareCliMockFixture(cwd: string): Promise<void> {
   const fixtureDir = join(cwd, '.dsh', 'profiles', 'headless', 'snapshot-fixtures')
+  const bundles = PROFILE_TEMPLATES.headless
+  if (bundles === undefined) throw new Error('headless profile template is unavailable')
+  initProfile(dirname(fixtureDir), bundles)
   await mkdir(fixtureDir, { recursive: true })
   await Promise.all([
     copyFile(cliMockLlmPluginPath, join(fixtureDir, 'cli-mock-llm.ts')),

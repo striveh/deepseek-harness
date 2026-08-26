@@ -1418,6 +1418,8 @@ export interface StreamableHttpConfig {
   url: string
   /** Additional headers attached to MCP requests. */
   headers: Record<string, string>
+  /** Explicit Fetch redirect policy for every MCP HTTP request. */
+  redirect: 'error' | 'follow' | 'manual'
   /** Per-tool-call timeout in milliseconds. */
   toolCallTimeoutMs: number
   /** Fail plugin activation when the initial connection or tool synchronization fails. */
@@ -1439,7 +1441,27 @@ export interface ReconnectConfig {
 }
 ```
 
-来源：[`packages/mcp/mcp-client/src/index.ts:98`](../packages/mcp/mcp-client/src/index.ts)
+来源：[`packages/mcp/mcp-client/src/index.ts:160`](../packages/mcp/mcp-client/src/index.ts)
+
+<a id="deepseek-aidsh-mcp-connections-local"></a>
+
+## `@deepseek-ai/dsh-mcp-connections-local`
+
+需要：`tools`
+
+```ts config-catalog
+/** Local provider configuration. */
+export interface Config {
+  /** Absolute or cwd-relative desired-state file; defaults under the Harness home. */
+  readonly path?: string
+  /** Harness home used only when `path` is omitted. */
+  readonly dshHome?: string
+  /** Maximum wait for another process's MCP desired-state writer. */
+  readonly lockWaitMs?: number
+}
+```
+
+来源：[`packages/mcp/mcp-connections-local/src/index.ts:56`](../packages/mcp/mcp-connections-local/src/index.ts)
 
 <a id="deepseek-aidsh-message-feedback"></a>
 
@@ -1535,6 +1557,26 @@ export interface PlanModeConfig {
 ```
 
 来源：[`packages/plan/plan-mode/src/index.ts:70`](../packages/plan/plan-mode/src/index.ts)
+
+<a id="deepseek-aidsh-profile-transactions-local"></a>
+
+## `@deepseek-ai/dsh-profile-transactions-local`
+
+```ts config-catalog
+/** Local Profile transaction provider configuration. */
+export interface Config {
+  /** Directory containing named Profile directories. */
+  profilesDir: string
+  /** Exact application package file used by production Profile bundle resolution. */
+  installAnchor: string
+  /** Maximum wait for another process's writer reservation. */
+  lockWaitMs?: number
+  /** Wall-clock budget for one isolated Loader validation. */
+  validationTimeoutMs?: number
+}
+```
+
+来源：[`packages/profile/profile-transactions-local/src/index.ts:74`](../packages/profile/profile-transactions-local/src/index.ts)
 
 <a id="deepseek-aidsh-pwsh-local"></a>
 
@@ -2411,6 +2453,34 @@ export interface Config {
 ```
 
 来源：[`packages/core/system-prompt/src/index.ts:186`](../packages/core/system-prompt/src/index.ts)
+
+<a id="deepseek-aidsh-task-continuation-driver"></a>
+
+## `@deepseek-ai/dsh-task-continuation-driver`
+
+需要：`agents` · `sessions` · `sessionPersistence`
+
+```ts config-catalog
+/** Local durable continuation-driver configuration. */
+export interface Config {
+  /** Directory containing the versioned claim database. */
+  root: string
+  /** Maximum wait for another process's atomic claim transition. */
+  busyTimeoutMs?: number
+  /** Maximum wait for one verifier decision before the claim becomes invalid. */
+  verifierTimeoutMs?: number
+  /** Renewable cross-process authority lifetime for one consumed dispatch. */
+  dispatchLeaseMs?: number
+  /** First automatic recovery retry delay after a transient fault. */
+  recoveryRetryInitialMs?: number
+  /** Maximum exponential recovery retry delay. */
+  recoveryRetryMaxMs?: number
+  /** Read-only poll interval while another Host may create or advance durable work. */
+  recoveryPollMs?: number
+}
+```
+
+来源：[`packages/continuation/task-continuation-driver/src/index.ts:64`](../packages/continuation/task-continuation-driver/src/index.ts)
 
 <a id="deepseek-aidsh-terminal-bash"></a>
 
@@ -3307,6 +3377,8 @@ export interface Config {
 - `@deepseek-ai/dsh-fs` — 抽象 `FileSystem`（[`packages/fs/fs/src/index.ts`](../packages/fs/fs/src/index.ts)）
 - `@deepseek-ai/dsh-host-directory-picker` — 抽象 `DirectoryPicker`（[`packages/host/directory-picker/src/index.ts`](../packages/host/directory-picker/src/index.ts)）
 - `@deepseek-ai/dsh-jobs` — 抽象 `JobRegistry`（[`packages/jobs/jobs/src/index.ts`](../packages/jobs/jobs/src/index.ts)）
+- `@deepseek-ai/dsh-mcp-connections` — 抽象 `McpConnections`（[`packages/mcp/mcp-connections/src/index.ts`](../packages/mcp/mcp-connections/src/index.ts)）
+- `@deepseek-ai/dsh-profile-transactions` — 抽象 `ProfileTransactions`（[`packages/profile/profile-transactions/src/index.ts`](../packages/profile/profile-transactions/src/index.ts)）
 - `@deepseek-ai/dsh-sandbox` — 抽象 `SandboxProvider`（[`packages/sandbox/sandbox/src/index.ts`](../packages/sandbox/sandbox/src/index.ts)）
 - `@deepseek-ai/dsh-session-persistence` — 抽象 `SessionPersistence`（[`packages/session/session-persistence/src/index.ts`](../packages/session/session-persistence/src/index.ts)）
 - `@deepseek-ai/dsh-session-query` — 抽象 `SessionQueryEngine`（[`packages/session-query/session-query/src/index.ts`](../packages/session-query/session-query/src/index.ts)）
@@ -3314,6 +3386,7 @@ export interface Config {
 - `@deepseek-ai/dsh-shell` — 抽象 `ShellExecutor`（[`packages/shell/shell/src/index.ts`](../packages/shell/shell/src/index.ts)）
 - `@deepseek-ai/dsh-spill` — 抽象 `SpillStore`（[`packages/spill/spill/src/index.ts`](../packages/spill/spill/src/index.ts)）
 - `@deepseek-ai/dsh-subprocess` — 抽象 `SubprocessRuntime`（[`packages/subprocess/subprocess/src/index.ts`](../packages/subprocess/subprocess/src/index.ts)）
+- `@deepseek-ai/dsh-task-continuation` — 抽象 `TaskContinuationService`（[`packages/continuation/task-continuation/src/index.ts`](../packages/continuation/task-continuation/src/index.ts)）
 - `@deepseek-ai/dsh-workflow` — 抽象 `WorkflowEngine`（[`packages/workflow/workflow/src/index.ts`](../packages/workflow/workflow/src/index.ts)）
 ## 库包（无插件入口）
 

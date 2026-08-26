@@ -3,16 +3,14 @@ import { parseDshArgs } from '../src/args.ts'
 
 const parse = (argv: string[]) => parseDshArgs(argv, '1.2.3')
 
-/** Capture the process exit code while muting Commander's output. */
-function exitCode(argv: string[]): number {
-  const exit = vi.spyOn(process, 'exit').mockImplementation(() => { throw new Error('exit') })
+/** Capture Commander's non-dispatch result while muting its rendered output. */
+function terminalExitCode(argv: string[]): number {
   vi.spyOn(process.stdout, 'write').mockReturnValue(true)
   vi.spyOn(process.stderr, 'write').mockReturnValue(true)
   try {
-    parse(argv)
-    throw new Error(`expected ${JSON.stringify(argv)} to exit`)
-  } catch {
-    return exit.mock.calls.at(-1)?.[0] as number
+    const result = parse(argv)
+    if (result.mode !== 'terminal') throw new Error(`expected ${JSON.stringify(argv)} to be terminal`)
+    return result.exitCode
   } finally {
     vi.restoreAllMocks()
   }
@@ -45,16 +43,17 @@ describe('parseDshArgs', () => {
       .toEqual({ mode: 'profile', profile: 'tui', patches: ['a.yml'], args: ['--resume', 'b', '--patch', 'late.yml'] })
   })
 
-  it('routes the plugin pnpm forwarder', () => {
-    expect(parse(['plugin', '--profile', 'tui', 'add', 'turtle-ui']))
-      .toEqual({ mode: 'plugin', profile: 'tui', args: ['add', 'turtle-ui'] })
-    expect(parse(['plugin', '--profile', 'tui', 'remove', 'turtle-ui']))
-      .toEqual({ mode: 'plugin', profile: 'tui', args: ['remove', 'turtle-ui'] })
-    expect(parse(['plugin', '--profile', 'tui', 'why', '@deepseek-ai/cordis']))
-      .toEqual({ mode: 'plugin', profile: 'tui', args: ['why', '@deepseek-ai/cordis'] })
-    // Unknown pnpm flags forward verbatim.
-    expect(parse(['plugin', '--profile', 'tui', 'add', '--save-dev', 'x']))
-      .toEqual({ mode: 'plugin', profile: 'tui', args: ['add', '--save-dev', 'x'] })
+  it('routes exact plugin lifecycle arguments to the transaction Consumer', () => {
+    expect(parse(['plugin', '--profile', 'web', 'install', './p.tgz', '--package', 'p', '--version', '1.0.0', '--digest', 'sha256:x', '--mutation-id', 'install-p']))
+      .toEqual({
+        mode: 'plugin',
+        profile: 'web',
+        args: ['install', './p.tgz', '--package', 'p', '--version', '1.0.0', '--digest', 'sha256:x', '--mutation-id', 'install-p'],
+      })
+    expect(parse(['plugin', '--profile', 'web', 'uninstall', 'p', '--mutation-id', 'uninstall-p']))
+      .toEqual({ mode: 'plugin', profile: 'web', args: ['uninstall', 'p', '--mutation-id', 'uninstall-p'] })
+    expect(parse(['plugin', '--profile', 'web', 'list']))
+      .toEqual({ mode: 'plugin', profile: 'web', args: ['list'] })
   })
 
   it('routes profile and web config dumps', () => {
@@ -71,36 +70,36 @@ describe('parseDshArgs', () => {
   })
 
   it('rejects missing profile, removed flags, and contradictory inputs', () => {
-    expect(exitCode([])).toBe(1)
-    expect(exitCode(['tui'])).toBe(1) // an app argument without --profile has no app to reach
-    expect(exitCode(['--config', 'c.yml'])).toBe(1) // removed
-    expect(exitCode(['-p', 'task'])).toBe(1) // removed
-    expect(exitCode(['run', 'task'])).toBe(1) // app-owned task replaced the launcher subcommand
-    expect(exitCode(['--profile', ''])).toBe(1)
-    expect(exitCode(['--profile', 'x', '--patch='])).toBe(1)
-    expect(exitCode(['--dump-config'])).toBe(1)
-    expect(exitCode(['--profile', 'x', '--dump-config', '--dump-default-config'])).toBe(1)
-    expect(exitCode(['--profile', 'x', '--dump-default-config', '--patch', 'p.yml'])).toBe(1)
-    expect(exitCode(['--profile', 'x', '--dump-config', 'task'])).toBe(1)
-    expect(exitCode(['--bogus'])).toBe(1)
-    expect(exitCode(['--profile', 'x', 'web'])).toBe(1)
-    expect(exitCode(['web', '--dump-config', '--dump-default-config'])).toBe(1)
-    expect(exitCode(['web', '--dump-default-config', '--patch', 'w.yml'])).toBe(1)
-    expect(exitCode(['web', '--patch='])).toBe(1)
+    expect(terminalExitCode([])).toBe(1)
+    expect(terminalExitCode(['tui'])).toBe(1) // an app argument without --profile has no app to reach
+    expect(terminalExitCode(['--config', 'c.yml'])).toBe(1) // removed
+    expect(terminalExitCode(['-p', 'task'])).toBe(1) // removed
+    expect(terminalExitCode(['run', 'task'])).toBe(1) // app-owned task replaced the launcher subcommand
+    expect(terminalExitCode(['--profile', ''])).toBe(1)
+    expect(terminalExitCode(['--profile', 'x', '--patch='])).toBe(1)
+    expect(terminalExitCode(['--dump-config'])).toBe(1)
+    expect(terminalExitCode(['--profile', 'x', '--dump-config', '--dump-default-config'])).toBe(1)
+    expect(terminalExitCode(['--profile', 'x', '--dump-default-config', '--patch', 'p.yml'])).toBe(1)
+    expect(terminalExitCode(['--profile', 'x', '--dump-config', 'task'])).toBe(1)
+    expect(terminalExitCode(['--bogus'])).toBe(1)
+    expect(terminalExitCode(['--profile', 'x', 'web'])).toBe(1)
+    expect(terminalExitCode(['web', '--dump-config', '--dump-default-config'])).toBe(1)
+    expect(terminalExitCode(['web', '--dump-default-config', '--patch', 'w.yml'])).toBe(1)
+    expect(terminalExitCode(['web', '--patch='])).toBe(1)
     // A dump never runs app command-line providers, so it cannot show what
     // those flags would decide; printing a tree that differs from the same
     // invocation's boot would mislead.
-    expect(exitCode(['web', '--dump-config', '--port', '8080'])).toBe(1)
-    expect(exitCode(['--profile', 'web', '--dump-config', '-h'])).toBe(1)
-    expect(exitCode(['plugin', 'add', 'x'])).toBe(1) // --profile required
-    expect(exitCode(['plugin', '--profile', 'tui'])).toBe(1) // nothing to forward
-    expect(exitCode(['plugin', '--profile', ''])).toBe(1)
-    expect(exitCode(['--profile', 'x', 'plugin', 'add', 'y'])).toBe(1)
+    expect(terminalExitCode(['web', '--dump-config', '--port', '8080'])).toBe(1)
+    expect(terminalExitCode(['--profile', 'web', '--dump-config', '-h'])).toBe(1)
+    expect(terminalExitCode(['plugin', 'list'])).toBe(1) // --profile required
+    expect(terminalExitCode(['plugin', '--profile', 'tui'])).toBe(1) // no lifecycle operation
+    expect(terminalExitCode(['plugin', '--profile', ''])).toBe(1)
+    expect(terminalExitCode(['--profile', 'x', 'plugin', 'add', 'y'])).toBe(1)
   })
 
   it('keeps its own help for an invocation with no app to hand it to', () => {
-    expect(exitCode(['--help'])).toBe(0)
-    expect(exitCode(['-h'])).toBe(0)
-    expect(exitCode(['--version'])).toBe(0)
+    expect(terminalExitCode(['--help'])).toBe(0)
+    expect(terminalExitCode(['-h'])).toBe(0)
+    expect(terminalExitCode(['--version'])).toBe(0)
   })
 })

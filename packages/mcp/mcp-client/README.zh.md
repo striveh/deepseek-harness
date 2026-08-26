@@ -25,6 +25,7 @@ MCP 客户端桥接插件：连接外部 [Model Context Protocol](https://modelc
     serverName: web
     transport: streamable-http
     url: http://localhost:3000/mcp
+    redirect: error
     headers:
       Authorization: !!js '`Bearer ${process.env.MCP_TOKEN}`'
 ```
@@ -43,6 +44,7 @@ MCP 客户端桥接插件：连接外部 [Model Context Protocol](https://modelc
 | `cwd` | stdio | 否 | 子进程工作目录 |
 | `url` | http | 是 | MCP 服务器 URL |
 | `headers` | http | 否 | 额外标头（例如认证 token） |
+| `redirect` | http | 是 | Fetch 重定向策略：`"error"`、`"follow"` 或 `"manual"`；扩展中心托管条目使用 `"error"` |
 | `toolCallTimeoutMs` | 两者 | 否 | 每次 `callTool` 调用的超时（默认 60000） |
 | `failOnStartupError` | 两者 | 否 | 初始连接或工具同步失败时拒绝插件激活（默认 `false`） |
 | `reconnect.enabled` | 两者 | 否 | 连接丢失后自动重新连接（默认 `true`） |
@@ -55,7 +57,7 @@ MCP 客户端桥接插件：连接外部 [Model Context Protocol](https://modelc
 每个 MCP 工具都有两个名称：通过 `tools/call` 在协议上传送的原始 MCP 名称，以及公开名称 `mcp__<serverName>__<rawName>`，后者注册到 `ctx.tools`。公开名称会规范化为 DeepSeek 函数名称约定（64 个字符、`[A-Za-z0-9_-]`）；如果替换或截断改变名称，就会追加 `(serverName, rawName)` 的确定性 12 位十六进制 hash，确保不同工具绝不会折叠为同一个名称。名称是 `(serverName, rawName)` 的纯函数：连接顺序、重新同步和其他服务器永远不会重命名工具。
 
 - 发布相同原始名称（例如 `search`）的两个服务器会在各自 namespace 下共存。
-- 存活实例中的重复 `serverName` 会使后加载的插件实例失败。
+- 存活实例中的重复 `serverName` 会使后加载的插件实例失败，即使先加载的实例尚未发现任何工具。动态 lifecycle owner 可以在提交期望状态前预留 app-root 名称，把准确 opaque token 借给 child `mcp-client`，并且只在 child 完全停稳后释放。
 - 服务器在工具列表中两次列出同一工具名称时，该列表会作为无效工具列表被拒绝。
 - 外部注册抢占该服务器 namespace 时，会回滚整个世代（绝不保留部分集合），并明确报错。
 

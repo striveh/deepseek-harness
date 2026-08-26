@@ -626,6 +626,24 @@ describe('boot', () => {
     }
   })
 
+  it('anchors relative entries at an explicit root without a bare-module anchor', async () => {
+    const launcher = tmp()
+    const profileRoot = tmp()
+    writeFileSync(
+      join(profileRoot, 'profile-relative.mjs'),
+      'export function apply(ctx) { ctx.provide("profileRelativePluginLoaded", true) }\n',
+    )
+    const rootConfig = join(launcher, 'cordis.yml')
+    writeFileSync(rootConfig, '- id: relative\n  name: ./profile-relative.mjs\n')
+
+    const ctx = await boot(NAME, rootConfig, undefined, undefined, undefined, profileRoot)
+    try {
+      expect(ctx.get('profileRelativePluginLoaded')).toBe(true)
+    } finally {
+      await ctx.fiber.dispose()
+    }
+  })
+
   it('runs host preparation before the Loader tree mounts', async () => {
     const dir = tmp()
     writeFileSync(join(dir, 'noop.mjs'), 'export const name = "noop"\nexport function apply() {}\n')

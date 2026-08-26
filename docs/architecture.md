@@ -49,6 +49,9 @@ Here are some core packages that contribute to the Cordis tree.
 | [`core/agent-loop`](subsystems/core.md) | The default driver implementing that interface | `ctx.agentLoop` |
 | [`core/scope`](subsystems/scope.md) | The per-agent scoped-registration primitive | library, no key |
 | [`llm/llm`](subsystems/llm-streaming.md) | Message and stream vocabulary plus the adapter seam | `ctx.llm` |
+| [`mcp/mcp-connections`](subsystems/mcp-connections.md) | Revisioned desired state for dynamically managed MCP clients | `ctx.mcpConnections` |
+| [`profile/profile-transactions`](subsystems/profile-transactions.md) | Immutable Profile generation staging, publication, and last-good restore | `ctx.profileTransactions` |
+| [`continuation/task-continuation`](subsystems/task-continuation.md) | Durable verifier-gated original-task continuation claims | `ctx.taskContinuations` |
 
 ## Events
 

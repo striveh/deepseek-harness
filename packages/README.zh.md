@@ -10,7 +10,7 @@ npm scope 为 `@deepseek-ai/dsh-*`；Cordis `Service` 子类和函数插件通�
 
 | 组 | 职责 | 发布预期 |
 |---|---|---|
-| [`core/`](core/README.zh.md) | 产品 API 主干：会话、提示词、工具、agent（智能体）服务与具体循环 | 产品：稳定 API |
+| [`core/`](core/README.zh.md) | 产品 API 主干 | 产品：稳定 API |
 | [`api/`](api/README.zh.md) | Remote BFF 装配与 Typert RPC 网关 | 产品：稳定 API |
 | [`typert/`](typert/README.zh.md) | 类型图生成、产物加载与运行时注册表 | 产品：稳定 API |
 | [`goal/`](goal/README.zh.md) | 同会话 goal 的持久化与生命周期 | 产品：稳定 API |
@@ -19,14 +19,15 @@ npm scope 为 `@deepseek-ai/dsh-*`；Cordis `Service` 子类和函数插件通�
 | [`identity/`](identity/README.zh.md) | 共享匿名身份 | 产品：稳定 API |
 | [`llm/`](llm/README.zh.md) | LLM（大语言模型）能力系列：抽象服务 + 提供方适配器 | 产品：稳定 API |
 | [`e2b/`](e2b/README.zh.md) | E2B 提供方 | POC |
-| [`subprocess/`](subprocess/README.zh.md) | 子进程能力系列：Service Definition + 本地进程树提供方 | 产品：稳定 API |
+| [`subprocess/`](subprocess/README.zh.md) | 子进程 seam 与提供方 | 产品：稳定 API |
 | [`shell/`](shell/README.zh.md) | Bash 能力系列：执行器 seam、本地实现、面向模型的工具 | 产品：稳定 API |
-| [`terminal/`](terminal/README.zh.md) | 持久 PTY 能力系列：限定所有者范围的会话、本地实现和面向模型的工具 | 产品：稳定 API |
-| [`code-runtime/`](code-runtime/README.zh.md) | 代码执行能力系列：Service Definition + worker 线程提供方 + Code Mode Consumer | 产品：稳定 API |
+| [`terminal/`](terminal/README.zh.md) | 持久 PTY 会话 | 产品：稳定 API |
+| [`code-runtime/`](code-runtime/README.zh.md) | 代码执行 seam 与提供方 | 产品：稳定 API |
 | [`sandbox/`](sandbox/README.zh.md) | 进程限制 seam；bwrap/Landlock/Seatbelt 后端 | 产品：稳定 API |
 | [`fs/`](fs/README.zh.md) | 文件系统能力系列：seam、本地实现、面向模型的文件工具、由 bash 支持的发现工具 | 产品：稳定 API |
 | [`lsp/`](lsp/README.zh.md) | LSP 能力系列：seam、通用 stdio 提供方和 `lsp` 工具 | 产品：稳定 API |
 | [`skill/`](skill/README.zh.md) | skill（技能）能力系列：提供方注册表、本地提供方和面向模型的目录／loader | 产品：稳定 API |
+| [`mcp/`](mcp/README.zh.md) | MCP 客户端桥接与持久化动态连接 owner | 产品：稳定 API |
 | [`compaction/`](compaction/README.zh.md) | 压缩（compaction）能力系列：Service Definition + 基础提供方 + 命令 Consumer | 产品：稳定 API |
 | [`context/`](context/README.zh.md) | 模型可见请求上下文，包括 workspace 指令和时间上下文 | 产品：稳定 API |
 | [`subagent/`](subagent/README.zh.md) | subagent 能力系列：提供方注册表约定和面向模型的委托工具 | 产品：稳定 API |
@@ -46,6 +47,8 @@ npm scope 为 `@deepseek-ai/dsh-*`；Cordis `Service` 子类和函数插件通�
 | [`session/`](session/README.zh.md) | 持久会话数据平面：持久化 seam + JSONL/SQLite 后端、投影 seam、基于日志的标题、会话上报 | 产品：稳定 API |
 | [`session-query/`](session-query/README.zh.md) | 会话检索系列：逻辑语料库、有界读取、血缘、事件关系、语义过滤和 SQLite 全文搜索 | 产品：稳定 API |
 | [`settings/`](settings/README.zh.md) | 用户设置 seam + 基于文件的提供方 | 产品：稳定 API |
+| [`profile/`](profile/README.zh.md) | 不可变 Profile generation 事务 + 本地持久化 provider | 产品：稳定 API |
+| [`continuation/`](continuation/README.zh.md) | 持久化、经 verifier 门控的原任务续跑 | 产品：稳定 API |
 | [`credentials/`](credentials/README.zh.md) | 凭据引用/记录 seam + 环境变量优先于 `.env` 的提供方 + 授权 flow | 产品：稳定 API |
 | [`storage/`](storage/README.zh.md) | 非会话存储中枢 + 后端 + 领域形式 | 产品：稳定 API |
 | [`workspace/`](workspace/README.zh.md) | Workspace 实体 | 产品：稳定 API |

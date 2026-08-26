@@ -17,6 +17,9 @@ One page per subsystem of the DeepSeek Harness: what it is, the data structures 
 | [session.md](session.md) | the full `SessionEventMap` variant catalog, `TurnTrigger`/`TurnEndReason`, `deriveMessages()`, execution enclosure, and standalone events |
 | [persistence.md](persistence.md) | the durability seam: `SessionPersistence`, JSONL + SQLite backends, `session/flush`, crash recovery, `SessionHeader` |
 | [settings.md](settings.md) | the user-settings seam: `SettingsNamespace` registration, layered resolution (defaults → composition `base` → user document), owner scopes, hot commits |
+| [profile-transactions.md](profile-transactions.md) | immutable Profile generations, optimistic revisions, validation, journaled publication, and last-good restore |
+| [mcp-connections.md](mcp-connections.md) | revisioned MCP desired state, dynamic connection ownership, Tool generations, quiescent mutation, and durable recovery |
+| [task-continuation.md](task-continuation.md) | durable verifier-gated original-task claims, restart recovery, exact-once Agent admission, cancellation, and supersession |
 | [credentials.md](credentials.md) | the credential seam: `CredentialRef` references (never values) in configuration, per-operation resolution, UI-safe `CredentialInfo`, provider source layers |
 | [session-query.md](session-query.md) | logical records, bounded exact-event reads, relationship traces, semantic filters/documents, and full-text result pages |
 | [feedback.md](feedback.md) | lifecycle-bound per-message feedback records, optimistic versions, sidecar persistence, and the Host Remote contract |
