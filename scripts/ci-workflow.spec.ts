@@ -892,7 +892,7 @@ describe('Issue lifecycle workflow', () => {
     expect(lifecyclePullRequest.types).not.toContain('ready_for_review')
     expect(lifecyclePullRequest.types).toContain('review_requested')
     expect(lifecycleReview.types).toEqual(['submitted'])
-    const gated = "${{ github.event_name != 'pull_request_review' || github.event.review.state == 'changes_requested' }}"
+    const gated = "${{ steps.app-credentials.outputs.enabled == 'true' && (github.event_name != 'pull_request_review' || github.event.review.state == 'changes_requested') }}"
     const steps = lifecycleJob.steps.filter(isRecord)
     const tokenStep = steps.find(s => s.name === 'Create project token')
     const handleStep = steps.find(s => s.name === 'Handle repository event')
@@ -904,6 +904,34 @@ describe('Issue lifecycle workflow', () => {
     expect(policyPullRequest.types).toContain('ready_for_review')
   })
 
+  it('skips Project App steps when the fork has no App credentials', () => {
+    // `secrets` cannot be referenced in `if:`; each workflow reads the App
+    // client-id and private key through a step-level `env` and emits one output
+    // the token-creating and board-mutating steps consume.
+    for (const file of ['issue-policy.yml', 'issue-lifecycle.yml']) {
+      const workflow = loadWorkflow('.github/workflows/' + file)
+      const jobName = file === 'issue-policy.yml' ? 'policy' : 'lifecycle'
+      const job = workflowJob(workflow, jobName)
+      if (!Array.isArray(job.steps)) throw new TypeError(`${file} must define steps`)
+      const steps = job.steps.filter(isRecord)
+      const gate = steps.find(s => s.name === 'Check Project App credentials')
+      expect(gate, `${file} must gate on App credentials`).toMatchObject({
+        id: 'app-credentials',
+        env: {
+          APP_CLIENT_ID: '${{ vars.DSH_ISSUE_APP_CLIENT_ID }}',
+          APP_PRIVATE_KEY: '${{ secrets.DSH_ISSUE_APP_PRIVATE_KEY }}',
+        },
+      })
+      expect(String(gate?.run)).toContain('"enabled=false" >> "$GITHUB_OUTPUT"')
+      expect(String(gate?.run)).toContain('"enabled=true" >> "$GITHUB_OUTPUT"')
+      // A half-configured App must fail instead of silently skipping the board.
+      expect(String(gate?.run)).toContain('must both be set or both be absent')
+      // The checkout stays unconditional so the check still reports success on
+      // a keyless fork rather than turning into a gray skip.
+      expect(steps.find(s => s.name === 'Check out trusted policy')?.if).toBeUndefined()
+    }
+  })
+
   it('uses a read-only Project token only for human pull request policy metadata', () => {
     const policy = loadWorkflow('.github/workflows/issue-policy.yml')
     const policyJob = workflowJob(policy, 'policy')
@@ -912,7 +940,7 @@ describe('Issue lifecycle workflow', () => {
     const tokenStep = steps.find(step => step.name === 'Create Project read token')
     const validateStep = steps.find(step => step.name === 'Validate pull request')
     const humanPullRequest =
-      "${{ github.event.pull_request.user.type != 'Bot' && github.event.pull_request.user.type != 'App' }}"
+      "${{ steps.app-credentials.outputs.enabled == 'true' && github.event.pull_request.user.type != 'Bot' && github.event.pull_request.user.type != 'App' }}"
 
     expect(tokenStep).toMatchObject({
       id: 'app-token',
