@@ -1,9 +1,19 @@
 name: Build PR preview
 
-# Every push to a pull request publishes that pull request's preview to
-# Cloudflare Pages under its own branch alias, behind Cloudflare Access. The
-# upload carries build products only: the workflow never grants the deployment
-# platform access to this repository's sources.
+# Every push to a pull request builds that pull request's preview. When the
+# Cloudflare credentials are configured it also publishes the build to Pages
+# under its own branch alias, behind Cloudflare Access. The upload carries build
+# products only: the workflow never grants the deployment platform access to
+# this repository's sources.
+#
+# A fork without the Cloudflare secrets (and every untrusted forked PR, which
+# GitHub withholds secrets from) still builds the preview and reports success:
+# the preview is an optional integration, not a gate on the pull request. The
+# `secrets` context is unavailable in `if:` conditionals (job-level and
+# step-level alike), so a trusted gate step reads the credentials through `env`
+# and emits a boolean output the deployment steps consume. Partially configured
+# credentials are a misconfiguration and fail loudly instead of silently
+# skipping the deployment.
 
 on:
   pull_request:
@@ -35,6 +45,27 @@ jobs:
     runs-on: ubuntu-24.04
     name: cloudflare pages preview
     steps:
+      # `secrets` cannot be referenced in `if:`; a step-level `env` can. Gate
+      # once here so every deployment-owned step shares one condition, and fail
+      # on a half-configured integration rather than reporting a false green.
+      - name: Check Cloudflare credentials
+        id: cloudflare
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
+        run: |
+          set -euo pipefail
+          if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] && [ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
+            echo "Cloudflare credentials absent; building the preview without deploying it."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ -z "${CLOUDFLARE_API_TOKEN:-}" ] || [ -z "${CLOUDFLARE_ACCOUNT_ID:-}" ]; then
+            echo "::error::CLOUDFLARE_API_TOKEN and CLOUDFLARE_ACCOUNT_ID must both be set or both be absent."
+            exit 1
+          fi
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
+
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
@@ -88,6 +119,7 @@ jobs:
           cp apps/web/dist/preview.html apps/web/dist/index.html
 
       - name: Upload to Cloudflare Pages
+        if: ${{ steps.cloudflare.outputs.enabled == 'true' }}
         env:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           CLOUDFLARE_ACCOUNT_ID: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
@@ -112,6 +144,7 @@ jobs:
       # Accept-Encoding is sent because a browser sends it; the assertion is
       # about what the platform does with a body that is already compressed.
       - name: Verify the protected deployment serves the image
+        if: ${{ steps.cloudflare.outputs.enabled == 'true' }}
         env:
           CF_ACCESS_CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
           CF_ACCESS_CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
@@ -151,6 +184,7 @@ jobs:
       # idempotent: a pull request opened before this workflow existed never
       # sees an `opened` event, and every later push must not restate the URL.
       - name: Comment the preview URL
+        if: ${{ steps.cloudflare.outputs.enabled == 'true' }}
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PR: ${{ github.event.pull_request.number }}

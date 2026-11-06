@@ -10,7 +10,7 @@ const workflow = yaml.load(readFileSync(resolve(import.meta.dirname, '../.github
   env: Record<string, string>
   jobs: Record<'preview', {
     'runs-on': string
-    steps: Array<{ name?: string; uses?: string; run?: string; with?: Record<string, unknown>; env?: Record<string, string> }>
+    steps: Array<{ id?: string; name?: string; uses?: string; run?: string; if?: string; with?: Record<string, unknown>; env?: Record<string, string> }>
   }>
 }
 const preview = workflow.jobs.preview
@@ -36,6 +36,37 @@ describe('PR preview workflow', () => {
     expect(preview.steps.find(step => step.uses === 'actions/cache/restore@v4')?.with).toMatchObject({
       key: "${{ runner.os }}-node-${{ env.PRIMARY_NODE_VERSION }}-pnpm-${{ hashFiles('pnpm-lock.yaml') }}",
     })
+  })
+
+  it('skips deployment-owned steps when the Cloudflare credentials are absent', () => {
+    // `secrets` cannot be referenced in `if:`; the workflow reads them through
+    // a step-level `env` and emits an output the deployment steps consume.
+    const gate = preview.steps.find(step => step.name === 'Check Cloudflare credentials')!
+    expect(gate.id).toBe('cloudflare')
+    expect(gate.env).toEqual({
+      CLOUDFLARE_API_TOKEN: '${{ secrets.CLOUDFLARE_API_TOKEN }}',
+      CLOUDFLARE_ACCOUNT_ID: '${{ secrets.CLOUDFLARE_ACCOUNT_ID }}',
+    })
+    expect(gate.run).toContain('"enabled=false" >> "$GITHUB_OUTPUT"')
+    expect(gate.run).toContain('"enabled=true" >> "$GITHUB_OUTPUT"')
+    // A half-configured integration must fail rather than report a false green.
+    expect(gate.run).toContain('must both be set or both be absent')
+
+    const deployOwned = [
+      'Upload to Cloudflare Pages',
+      'Verify the protected deployment serves the image',
+      'Comment the preview URL',
+    ]
+    for (const name of deployOwned) {
+      const step = preview.steps.find(s => s.name === name)!
+      expect(step.if, `${name} must be gated on the credential output`).toBe(
+        "${{ steps.cloudflare.outputs.enabled == 'true' }}",
+      )
+    }
+    // The build itself stays unconditional: a keyless fork still proves the
+    // preview compiles instead of turning the whole check into a gray skip.
+    expect(preview.steps.find(s => s.name === 'Build workspace')?.if).toBeUndefined()
+    expect(preview.steps.find(s => s.name === 'Build the preview page and pack the VFS image')?.if).toBeUndefined()
   })
 
   it('retains per-PR deployment, protected image verification, and idempotent URL comments', () => {

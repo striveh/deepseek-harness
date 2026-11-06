@@ -11,6 +11,13 @@ permissions:
   issues: read
   pull-requests: read
 
+# The GitHub App that owns Project reads is an optional integration: a fork with
+# neither the App client-id variable nor its private key cannot mint a Project
+# token, and `create-github-app-token` hard-fails on an empty client-id. `vars`
+# is available in `if:` but `secrets` is not, so a gate step reads both through
+# `env` and emits one boolean output. Absent credentials skip the human-PR
+# policy instead of failing the pull request; a half-configured App is a
+# misconfiguration and fails loudly.
 jobs:
   policy:
     name: Issue policy
@@ -21,9 +28,26 @@ jobs:
         with:
           ref: ${{ github.event.repository.default_branch }}
           persist-credentials: false
+      - name: Check Project App credentials
+        id: app-credentials
+        env:
+          APP_CLIENT_ID: ${{ vars.DSH_ISSUE_APP_CLIENT_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.DSH_ISSUE_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${APP_CLIENT_ID:-}" ] && [ -z "${APP_PRIVATE_KEY:-}" ]; then
+            echo "Project App credentials absent; skipping the human-PR policy."
+            echo "enabled=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          if [ -z "${APP_CLIENT_ID:-}" ] || [ -z "${APP_PRIVATE_KEY:-}" ]; then
+            echo "::error::DSH_ISSUE_APP_CLIENT_ID and DSH_ISSUE_APP_PRIVATE_KEY must both be set or both be absent."
+            exit 1
+          fi
+          echo "enabled=true" >> "$GITHUB_OUTPUT"
       - name: Create Project read token
         id: app-token
-        if: ${{ github.event.pull_request.user.type != 'Bot' && github.event.pull_request.user.type != 'App' }}
+        if: ${{ steps.app-credentials.outputs.enabled == 'true' && github.event.pull_request.user.type != 'Bot' && github.event.pull_request.user.type != 'App' }}
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1
         with:
           client-id: ${{ vars.DSH_ISSUE_APP_CLIENT_ID }}
@@ -33,7 +57,7 @@ jobs:
           permission-issues: read
           permission-organization-projects: read
       - name: Validate pull request
-        if: ${{ github.event.pull_request.user.type != 'Bot' && github.event.pull_request.user.type != 'App' }}
+        if: ${{ steps.app-credentials.outputs.enabled == 'true' && github.event.pull_request.user.type != 'Bot' && github.event.pull_request.user.type != 'App' }}
         env:
           GITHUB_TOKEN: ${{ github.token }}
           PROJECT_TOKEN: ${{ steps.app-token.outputs.token }}
