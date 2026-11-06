@@ -528,6 +528,19 @@ describe('DeepSeek e2e workflow', () => {
     expect(JSON.stringify(steps)).not.toContain('apt-get')
   })
 
+  it('pins a bubblewrap GA release-pocket build with a verified SHA256', () => {
+    const script = readFileSync(resolve(root, 'scripts/prepare-ci-bubblewrap.sh'), 'utf8')
+    const version = /readonly BUBBLEWRAP_VERSION='([^']+)'/.exec(script)?.[1]
+    const sha256 = /readonly BUBBLEWRAP_SHA256='([^']+)'/.exec(script)?.[1]
+
+    // Superseded -ubuntu0.x security builds are pruned from the pool on the
+    // next update, so pinning one makes the download 404. The GA build's URL
+    // stays valid for the release's lifetime.
+    expect(version).toMatch(/^\d[\w.+~-]*-\d+build\d+$/)
+    expect(script).toContain('bubblewrap_${BUBBLEWRAP_VERSION}_amd64.deb')
+    expect(sha256).toMatch(/^[0-9a-f]{64}$/)
+  })
+
   it('bounds profile subprocess fan-out to the tested e2e default', () => {
     const workflow = loadWorkflow('.github/workflows/e2e.yml')
     const e2e = workflowJob(workflow, 'e2e')
